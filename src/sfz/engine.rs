@@ -2,11 +2,6 @@
 
 use super::errors::*;
 
-pub(super) enum Tag {
-    Group(RegionData),
-    Region(RegionData)
-}
-
 
 #[derive(Clone, Copy)]
 pub(super) struct VelRange {
@@ -147,7 +142,7 @@ impl Default for Trigger {
 
 
 #[derive(Clone)]
-pub struct RegionData {
+pub struct Region {
     pub(super) key_range: NoteRange,
     pub(super) vel_range: VelRange,
 
@@ -176,9 +171,9 @@ pub struct RegionData {
     pub(super) random_range: RandomRange
 }
 
-impl Default for RegionData {
+impl Default for Region {
     fn default() -> Self {
-	RegionData {
+	Region {
 	    key_range: Default::default(),
 	    vel_range: Default::default(),
 
@@ -206,7 +201,7 @@ impl Default for RegionData {
     }
 }
 
-impl RegionData {
+impl Region {
     pub(super) fn set_amp_veltrack(&mut self, v: i32) -> Result<(), RangeError> {
 	match v {
 	    v if v >= -100 && v <= 100 => {
@@ -302,15 +297,22 @@ impl RegionData {
     }
 }
 
+
+pub struct Engine {
+    pub(super) regions: Vec<Region>
+}
+
+
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use super::super::parser::Parser;
+    use super::super::parser::parse_sfz_text;
 
     #[test]
     fn region_data_default() {
-	let rd: RegionData = Default::default();
+	let rd: Region = Default::default();
 
 	assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 	assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
@@ -324,8 +326,7 @@ mod tests {
 
     #[test]
     fn parse_empty_text() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("".to_string()) {
+	match parse_sfz_text("".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "General parser error: Expecting <> tag in sfz file"),
 	    _ => panic!("Expected error message")
 	}
@@ -333,11 +334,10 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_region_line() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<region> hikey=42 lokey=23".to_string()).unwrap();
-	assert_eq!(tags.len(), 1);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text("<region> hikey=42 lokey=23".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 1);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
 		assert_eq!(rd.vel_range.hi, 127);
@@ -349,11 +349,10 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_notefmt_region_line() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<region> hikey=c#3 lokey=ab2 <region> hikey=c3 lokey=a2".to_string()).unwrap();
-	assert_eq!(tags.len(), 2);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text("<region> hikey=c#3 lokey=ab2 <region> hikey=c3 lokey=a2".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 2);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::GSharp1));
 		assert_eq!(rd.vel_range.hi, 127);
@@ -361,8 +360,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[1] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(1) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::C2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::A1));
 		assert_eq!(rd.vel_range.hi, 127);
@@ -374,15 +373,13 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_group_line() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<group> hivel=42 lovel=23".to_string()).unwrap();
-	assert_eq!(tags.len(), 0);
+	let engine = parse_sfz_text("<group> hivel=42 lovel=23".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 0);
     }
 
     #[test]
     fn parse_sfz_invalid_header_line() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("<foo> hikey=42 lokey=23".to_string()) {
+	match parse_sfz_text("<foo> hikey=42 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "Unknown key: foo"),
 	    _ => panic!("Not seen expected error")
 	}
@@ -390,8 +387,7 @@ mod tests {
 
     #[test]
     fn parse_sfz_invalid_opcode_line() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("<region> foo=42 lokey=23".to_string()) {
+	match parse_sfz_text("<region> foo=42 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "Unknown key: foo"),
 	    _ => panic!("Not seen expected error")
 	}
@@ -399,8 +395,7 @@ mod tests {
 
     #[test]
     fn parse_sfz_invalid_non_int_value_line() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("<region> hikey=aa lokey=23".to_string()) {
+	match parse_sfz_text("<region> hikey=aa lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "Invalid key: aa"),
 	    _ => panic!("Not seen expected error")
 	}
@@ -408,12 +403,11 @@ mod tests {
 
     #[test]
     fn parse_out_of_range_amp_veltrack() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("<region> amp_veltrack=105 lokey=23".to_string()) {
+	match parse_sfz_text("<region> amp_veltrack=105 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "amp_veltrack out of range: -100 <= 105 <= 100"),
 	    _ => panic!("Not seen expected error")
 	}
-	match parser.parse_sfz_text("<region> amp_veltrack=-105 lokey=23".to_string()) {
+	match parse_sfz_text("<region> amp_veltrack=-105 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "amp_veltrack out of range: -100 <= -105 <= 100"),
 	    _ => panic!("Not seen expected error")
 	}
@@ -421,16 +415,15 @@ mod tests {
 
     #[test]
     fn parse_out_of_range_ampeg_release() {
-	let mut parser = Parser::new();
-	match parser.parse_sfz_text("<region> ampeg_release=105 lokey=23".to_string()) {
+	match parse_sfz_text("<region> ampeg_release=105 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "ampeg_release out of range: 0 <= 105 <= 100"),
 	    _ => panic!("Not seen expected error")
 	}
-	match parser.parse_sfz_text("<region> ampeg_release=-20 lokey=23".to_string()) {
+	match parse_sfz_text("<region> ampeg_release=-20 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "ampeg_release out of range: 0 <= -20 <= 100"),
 	    _ => panic!("Not seen expected error")
 	}
-	match parser.parse_sfz_text("<region> ampeg_release=aa lokey=23".to_string()) {
+	match parse_sfz_text("<region> ampeg_release=aa lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e),  "invalid float literal"),
 	    _ => panic!("Not seen expected error")
 	}
@@ -438,11 +431,10 @@ mod tests {
 
     #[test]
     fn parse_sfz_comment_in_line() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<region> hivel=42 lovel=23 // foo".to_string()).unwrap();
-	assert_eq!(tags.len(), 1);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text("<region> hivel=42 lovel=23 // foo".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 1);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
 		assert_eq!(rd.vel_range.hi, 42);
@@ -454,11 +446,10 @@ mod tests {
 
     #[test]
     fn parse_region_line_span() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<region> hivel=42 lovel=23 \n hikey=43 lokey=24".to_string()).unwrap();
-	assert_eq!(tags.len(), 1);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text("<region> hivel=42 lovel=23 \n hikey=43 lokey=24".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 1);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
 		assert_eq!(rd.vel_range.hi, 42);
@@ -470,11 +461,10 @@ mod tests {
 
     #[test]
     fn parse_region_line_span_with_coment() {
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text("<region> hivel=42 lovel=23 // foo bar foo\nhikey=43 lokey=24".to_string()).unwrap();
-	assert_eq!(tags.len(), 1);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text("<region> hivel=42 lovel=23 // foo bar foo\nhikey=43 lokey=24".to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 1);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
 		assert_eq!(rd.vel_range.hi, 42);
@@ -486,32 +476,30 @@ mod tests {
 
     #[test]
     fn parse_two_region_line() {
-	let mut parser = Parser::new();
 	let s = "<region> hivel=41 lovel=22 <region> hikey=42 lokey=23";
 
-	let tags = parser.parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(tags.len(), 2)
+	let engine = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 2)
     }
 
     #[test]
     fn parse_regions_inheriting_group_data() {
-	let mut parser = Parser::new();
 	let s = "
 <group> hivel=42
 <region> lovel=23
 <region> lovel=21
 ";
-	let tags = parser.parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(tags.len(), 2);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 2);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 23)
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[1] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(1) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 21)
 	    }
@@ -521,7 +509,6 @@ mod tests {
 
     #[test]
     fn parse_regions_inheriting_group_data_2groups() {
-	let mut parser = Parser::new();
 	let s = "
 <group> hivel=42 hikey=41
 <region> lokey=23
@@ -530,11 +517,12 @@ mod tests {
 <region> lokey=23
 <region> lovel=21
 <region> hikey=43 hivel=42 lokey=23
+<region> lovel=23
 ";
-	let tags = parser.parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(tags.len(), 5);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	let engine = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(engine.regions.len(), 6);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::F1));
@@ -542,8 +530,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[1] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(1) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 21);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::F1));
@@ -551,8 +539,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[2] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(2) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 41);
 		assert_eq!(rd.vel_range.lo, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
@@ -560,8 +548,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[3] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(3) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 41);
 		assert_eq!(rd.vel_range.lo, 21);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
@@ -569,12 +557,21 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[4] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(4) {
+	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
+	    }
+	    _ => panic!("Expected region, got somthing different.")
+	}
+	match &engine.regions.get(5) {
+	    Some(rd) => {
+		assert_eq!(rd.vel_range.hi, 41);
+		assert_eq!(rd.vel_range.lo, 23);
+		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
+		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -630,12 +627,11 @@ mod tests {
 <region> sample=48khz24bit\pedalU2.wav lorand=0.5 hirand=1
 
 "#;
-	let mut parser = Parser::new();
-	let tags = parser.parse_sfz_text(s.to_string()).unwrap();
+	let engine = parse_sfz_text(s.to_string()).unwrap();
 
-	assert_eq!(tags.len(), 12);
-	match &tags[0] {
-	    Tag::Region(rd) => {
+	assert_eq!(engine.regions.len(), 12);
+	match &engine.regions.get(0) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		assert_eq!(rd.ampeg_release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
@@ -658,8 +654,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[1] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(1) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		assert_eq!(rd.ampeg_release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
@@ -682,8 +678,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[2] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(2) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		assert_eq!(rd.ampeg_release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
@@ -706,8 +702,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[3] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(3) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		assert_eq!(rd.ampeg_release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
@@ -730,8 +726,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[4] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(4) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.94);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
@@ -754,8 +750,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[5] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(5) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.94);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C0);
@@ -778,8 +774,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[6] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(6) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
@@ -802,8 +798,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[7] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(7) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
@@ -826,8 +822,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[8] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(8) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
@@ -850,8 +846,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[9] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(9) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
@@ -874,8 +870,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[10] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(10) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
@@ -898,8 +894,8 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &tags[11] {
-	    Tag::Region(rd) => {
+	match &engine.regions.get(11) {
+	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);

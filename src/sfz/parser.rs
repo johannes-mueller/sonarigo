@@ -8,10 +8,6 @@ use std::str::Chars;
 use super::engine;
 use super::errors::*;
 
-pub(crate) struct Parser {
-    current_group: engine::RegionData
-}
-
 #[derive(Debug)]
 pub(super) enum ParserError {
     RangeError(RangeError),
@@ -202,7 +198,7 @@ fn parse_opcode(chars: &mut Chars) -> Result<(Option<(String, String)>, NextChar
 
 
 
-fn take_opcode(region: &mut engine::RegionData, key: &str, value: &str) -> Result<(), ParserError> {
+fn take_opcode(region: &mut engine::Region, key: &str, value: &str) -> Result<(), ParserError> {
     match key {
 	"lokey" => region.key_range.set_lo(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
 	"hikey" => region.key_range.set_hi(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
@@ -256,63 +252,66 @@ fn parse_trigger(s: &str) -> Result<engine::Trigger, ParserError> {
 	}
 }
 
-impl Parser {
-    pub(crate) fn new() -> Self {
-	Parser { current_group: Default::default() }
-    }
 
-    fn parse_tag(&self, chars: &mut Chars) -> Result<(engine::Tag, NextChar), ParserError> {
-	let header_string = parse_header(chars)?;
+fn parse_region(chars: &mut Chars, mut region: engine::Region) -> Result<(engine::Region, NextChar), ParserError> {
 
-	let mut tag = match header_string.trim() {
-	    "group" => engine::Tag::Group(Default::default()),
-	    "region" => engine::Tag::Region(self.current_group.clone()),
+    let nc = loop {
+	match parse_opcode(chars) {
+	    Err(e) => return Err(e),
+	    Ok((nop, nc)) => {
+		match nop {
+		    Some((opcode, value)) => {
+			take_opcode(&mut region, opcode.trim(), value.trim())?
+		    }
+		    None => break nc
+		}
+		match nc {
+		    NextChar::NewTag => break NextChar::NewTag,
+		    _ => {}
+		}
+	    }
+	}
+    };
+
+    Ok((region, nc))
+}
+
+pub(super) fn parse_sfz_text(text: String) -> Result<engine::Engine, ParserError> {
+    let mut chars = text.chars();
+
+    let mut current_group = engine::Region::default();
+
+    let mut regions = vec![];
+
+    match next_char_skip_whitespace(&mut chars) {
+	NextChar::NewTag => {},
+	NextChar::None | NextChar::Some(_) => return Err(ParserError::General("Expecting <> tag in sfz file".to_string()))
+    };
+
+    loop {
+	let header_string = parse_header(&mut chars)?;
+
+	let nc = match header_string.trim() {
+	    "group" => {
+		let (grp, nc) = parse_region(&mut chars, engine::Region::default())?;
+		current_group = grp;
+		nc
+	    }
+	    "region" => {
+		let (reg, nc) = parse_region(&mut chars, current_group.clone())?;
+		regions.push(reg);
+		nc
+	    }
 	    s => return Err(ParserError::KeyError(s.to_string()))
 	};
 
-	let nc = loop {
-	    match parse_opcode(chars) {
-		Err(e) => return Err(e),
-		Ok((nop, nc)) => {
-		    match nop {
-			Some((opcode, value)) => {
-			    match tag {
-				engine::Tag::Region(ref mut rd) | engine::Tag::Group(ref mut rd) => { take_opcode(rd, opcode.trim(), value.trim())? },
-			    }
-			}
-			None => break nc
-
-		    }
-		    match nc {
-			NextChar::NewTag => break NextChar::NewTag,
-			_ => {}
-		    }
-		}
-	    }
-	};
-
-	Ok((tag, nc))
-    }
-
-    pub(super) fn parse_sfz_text(&mut self, text: String) -> Result<Vec<engine::Tag>, ParserError> {
-	let mut chars = text.chars();
-
-	let mut tags = vec![];
-
-	let mut nc = match next_char_skip_whitespace(&mut chars) {
-	    NextChar::NewTag => NextChar::NewTag,
-	    NextChar::None | NextChar::Some(_) => return Err(ParserError::General("Expecting <> tag in sfz file".to_string()))
-	};
-
-	while let NextChar::NewTag = nc {
-	    let (tag, _nc) = self.parse_tag(&mut chars)?;
-	    match tag {
-		engine::Tag::Group(rd) => { self.current_group = rd; },
-		_ => tags.push(tag)
-	    }
-	    nc = _nc;
+	match nc {
+	    NextChar::NewTag => {}
+	    _ => break
 	}
-
-	Ok(tags)
     }
+
+    Ok(engine::Engine {
+	regions: regions
+    })
 }
