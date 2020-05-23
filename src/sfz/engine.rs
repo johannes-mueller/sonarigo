@@ -2,6 +2,7 @@
 
 use super::errors::*;
 
+use crate::engine;
 
 #[derive(Clone, Copy)]
 pub(super) struct VelRange {
@@ -347,13 +348,22 @@ pub struct Engine {
     pub(super) regions: Vec<Region>
 }
 
+impl engine::EngineTrait for Engine {
+    fn midi_event(&mut self, midi_msg: wmidi::MidiMessage) {}
 
+    fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+	for r in &mut self.regions {
+	    r.process(out_left, out_right);
+	}
+    }
+}
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
     use super::super::parser::parse_sfz_text;
+    use crate::engine::EngineTrait;
 
     #[test]
     fn region_data_default() {
@@ -996,5 +1006,40 @@ mod tests {
 
 	assert_eq!(out_right[0], 0.3);
 	assert_eq!(out_right[1], -0.5);
+    }
+
+    #[test]
+    fn simple_engine_process() {
+	let sample1 = vec![(1.0, 0.5), (0.5, 1.0), (1.0, 0.5)];
+	let sample2 = vec![(-0.5, 0.5), (-0.5, -0.5), (0.0, 0.5)];
+
+	let mut engine = Engine { regions: Vec::new() };
+
+	let mut region = Region::default();
+	region.state.active = true;
+	region.sample_data = sample1.clone();
+	engine.regions.push(region);
+
+	let mut region = Region::default();
+	region.state.active = true;
+	region.sample_data = sample2.clone();
+	engine.regions.push(region);
+
+	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+	let mut out_right: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(engine.regions[0].state.active, false);
+	assert_eq!(engine.regions[1].state.active, false);
+
+	assert_eq!(out_left[0], 0.5);
+	assert_eq!(out_left[1], 0.0);
+	assert_eq!(out_left[2], 1.0);
+
+	assert_eq!(out_right[0], 1.0);
+	assert_eq!(out_right[1], 0.5);
+	assert_eq!(out_right[2], 1.0);
     }
 }
