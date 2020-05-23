@@ -142,6 +142,21 @@ impl Default for Trigger {
 
 
 #[derive(Clone)]
+struct RegionState {
+    active: bool,
+    position: u32,
+}
+
+impl Default for RegionState {
+    fn default() -> Self {
+	RegionState {
+	    active: false,
+	    position: 0
+	}
+    }
+}
+
+#[derive(Clone)]
 pub struct Region {
     pub(super) key_range: NoteRange,
     pub(super) vel_range: VelRange,
@@ -168,7 +183,11 @@ pub struct Region {
     on_lo_cc: (u32, i32),
     on_hi_cc: (u32, i32),
 
-    pub(super) random_range: RandomRange
+    pub(super) random_range: RandomRange,
+
+    sample_data: Vec<(f32, f32)>,
+    state: RegionState
+
 }
 
 impl Default for Region {
@@ -196,7 +215,10 @@ impl Default for Region {
 	    on_lo_cc: (0, 0),
 	    on_hi_cc: (0, 0),
 
-	    random_range: Default::default()
+	    random_range: Default::default(),
+
+	    sample_data: Vec::new(),
+	    state: Default::default()
 	}
     }
 }
@@ -294,6 +316,29 @@ impl Region {
 
     pub(super) fn set_on_hi_cc(&mut self, channel: u32, v: i32) {
 	self.on_hi_cc = (channel, v);
+    }
+
+    fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+	if !self.state.active {
+	    return;
+	}
+
+	let mut position = self.state.position as usize;
+
+	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
+	    if position >= self.sample_data.len() {
+		position = 0;
+		self.state.active = false;
+		break;
+	    }
+	    let (sl, sr) = self.sample_data[position];
+	    *l += sl;
+	    *r += sr;
+
+	    position += 1;
+	}
+
+	self.state.position = position as u32;
     }
 }
 
@@ -918,5 +963,38 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
+    }
+
+    #[test]
+    fn simple_region_process() {
+	let sample = vec![(1.0, 0.5), (0.5, 1.0), (1.0, 0.5)];
+
+	let mut region = Region::default();
+	region.state.active = true;
+	region.sample_data = sample.clone();
+
+	let mut out_left: [f32; 2] = [0.0, 0.0];
+	let mut out_right: [f32; 2] = [0.0, 0.0];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(region.state.active, true);
+	assert_eq!(region.state.position, 2);
+	assert_eq!(out_left[0], 1.0);
+	assert_eq!(out_left[1], 0.5);
+
+	assert_eq!(out_right[0], 0.5);
+	assert_eq!(out_right[1], 1.0);
+
+	let mut out_left: [f32; 2] = [-0.5, -0.2];
+	let mut out_right: [f32; 2] = [-0.2, -0.5];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(region.state.active, false);
+	assert_eq!(region.state.position, 0);
+	assert_eq!(out_left[0], 0.5);
+	assert_eq!(out_left[1], -0.2);
+
+	assert_eq!(out_right[0], 0.3);
+	assert_eq!(out_right[1], -0.5);
     }
 }
