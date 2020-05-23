@@ -3,6 +3,7 @@
 use super::errors::*;
 
 use crate::engine;
+use crate::utils;
 
 #[derive(Clone, Copy)]
 pub(super) struct VelRange {
@@ -324,6 +325,8 @@ impl Region {
 	    return;
 	}
 
+	let gain = utils::dB_to_gain(self.volume);
+
 	let mut position = self.state.position as usize;
 
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
@@ -333,8 +336,8 @@ impl Region {
 		break;
 	    }
 	    let (sl, sr) = self.sample_data[position];
-	    *l += sl;
-	    *r += sr;
+	    *l += sl * gain;
+	    *r += sr * gain;
 
 	    position += 1;
 	}
@@ -1006,6 +1009,24 @@ mod tests {
 
 	assert_eq!(out_right[0], 0.3);
 	assert_eq!(out_right[1], -0.5);
+    }
+
+    #[test]
+    fn region_volume_process() {
+	let sample = vec![(1.0, 1.0)];
+
+	let mut region = Region::default();
+	region.state.active = true;
+	region.sample_data = sample.clone();
+	region.set_volume(-20.0).unwrap();
+
+	let mut out_left: [f32; 2] = [0.0, 0.0];
+	let mut out_right: [f32; 2] = [0.0, 0.0];
+
+	region.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.1);
+	assert_eq!(out_right[0], 0.1);
     }
 
     #[test]
