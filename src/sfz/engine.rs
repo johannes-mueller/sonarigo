@@ -145,15 +145,13 @@ impl Default for Trigger {
 
 #[derive(Clone)]
 struct RegionState {
-    active: bool,
-    position: u32,
+    position: Option<usize>,
 }
 
 impl Default for RegionState {
     fn default() -> Self {
 	RegionState {
-	    active: false,
-	    position: 0
+	    position: None
 	}
     }
 }
@@ -187,10 +185,11 @@ pub struct Region {
 
     pub(super) random_range: RandomRange,
 
-    sample_data: Vec<(f32, f32)>,
+    sample_data: Vec<f32>,
     state: RegionState
 
 }
+
 
 impl Default for Region {
     fn default() -> Self {
@@ -198,7 +197,7 @@ impl Default for Region {
 	    key_range: Default::default(),
 	    vel_range: Default::default(),
 
-	    pitch_keycenter: wmidi::Note::C4,
+	    pitch_keycenter: wmidi::Note::C3,
 
 	    pitch_keytrack: 100.0,
 
@@ -320,29 +319,49 @@ impl Region {
 	self.on_hi_cc = (channel, v);
     }
 
+    fn set_sample_data(&mut self,  sample_data: Vec<f32>) {
+	self.sample_data = sample_data
+    }
+
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
-	if !self.state.active {
-	    return;
-	}
+	let mut position = match self.state.position {
+	    Some(p) => p,
+	    None => return
+	};
 
 	let gain = utils::dB_to_gain(self.volume);
 
-	let mut position = self.state.position as usize;
-
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
 	    if position >= self.sample_data.len() {
-		position = 0;
-		self.state.active = false;
-		break;
+		self.state.position = None;
+		return;
 	    }
-	    let (sl, sr) = self.sample_data[position];
+	    let sl = self.sample_data[position];
+	    let sr = self.sample_data[position+1];
 	    *l += sl * gain;
 	    *r += sr * gain;
 
-	    position += 1;
+	    position += 2;
 	}
 
-	self.state.position = position as u32;
+	self.state.position = Some(position);
+    }
+
+    fn is_active(&self) -> bool {
+	self.state.position.is_some()
+    }
+
+    fn activate(&mut self) {
+	if !self.is_active() {
+	    self.state.position = Some(0);
+	}
+    }
+
+    fn pass_midi_msg(&mut self, midi_msg: &wmidi::MidiMessage) {
+	match midi_msg {
+	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.activate(),
+	    _ => {}
+	}
     }
 }
 
@@ -352,7 +371,11 @@ pub struct Engine {
 }
 
 impl engine::EngineTrait for Engine {
-    fn midi_event(&mut self, midi_msg: wmidi::MidiMessage) {}
+    fn midi_event(&mut self, midi_msg: &wmidi::MidiMessage) {
+	for r in &mut self.regions {
+	    r.pass_midi_msg(midi_msg);
+	}
+    }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
 	for r in &mut self.regions {
@@ -367,6 +390,8 @@ mod tests {
     use super::*;
     use super::super::parser::parse_sfz_text;
     use crate::engine::EngineTrait;
+
+    use std::f32::consts::PI;
 
     #[test]
     fn region_data_default() {
@@ -836,7 +861,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::AMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
@@ -860,7 +885,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::ASharpMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::ASharpMinus1));
@@ -884,7 +909,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
@@ -908,7 +933,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
@@ -932,7 +957,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
@@ -956,7 +981,7 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		assert_eq!(rd.ampeg_release, 0.0);
-		assert_eq!(rd.pitch_keycenter, wmidi::Note::C4);
+		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
@@ -980,18 +1005,20 @@ mod tests {
 
     #[test]
     fn simple_region_process() {
-	let sample = vec![(1.0, 0.5), (0.5, 1.0), (1.0, 0.5)];
+	let sample = vec![1.0, 0.5,
+			  0.5, 1.0,
+			  1.0, 0.5];
 
 	let mut region = Region::default();
-	region.state.active = true;
-	region.sample_data = sample.clone();
+	region.state.position = Some(0);
+
+	region.set_sample_data(sample.clone());
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
 
 	region.process(&mut out_left, &mut out_right);
-	assert_eq!(region.state.active, true);
-	assert_eq!(region.state.position, 2);
+	assert!(region.is_active());
 	assert_eq!(out_left[0], 1.0);
 	assert_eq!(out_left[1], 0.5);
 
@@ -1002,8 +1029,7 @@ mod tests {
 	let mut out_right: [f32; 2] = [-0.2, -0.5];
 
 	region.process(&mut out_left, &mut out_right);
-	assert_eq!(region.state.active, false);
-	assert_eq!(region.state.position, 0);
+	assert!(!region.is_active());
 	assert_eq!(out_left[0], 0.5);
 	assert_eq!(out_left[1], -0.2);
 
@@ -1013,11 +1039,11 @@ mod tests {
 
     #[test]
     fn region_volume_process() {
-	let sample = vec![(1.0, 1.0)];
+	let sample = vec![1.0, 1.0];
 
 	let mut region = Region::default();
-	region.state.active = true;
-	region.sample_data = sample.clone();
+	region.state.position = Some(0);
+	region.set_sample_data(sample.clone());
 	region.set_volume(-20.0).unwrap();
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
@@ -1029,21 +1055,26 @@ mod tests {
 	assert_eq!(out_right[0], 0.1);
     }
 
+
     #[test]
     fn simple_engine_process() {
-	let sample1 = vec![(1.0, 0.5), (0.5, 1.0), (1.0, 0.5)];
-	let sample2 = vec![(-0.5, 0.5), (-0.5, -0.5), (0.0, 0.5)];
+	let sample1 = vec![1.0, 0.5,
+			   0.5, 1.0,
+			   1.0, 0.5];
+	let sample2 = vec![-0.5, 0.5,
+			   -0.5, -0.5,
+			   0.0, 0.5];
 
 	let mut engine = Engine { regions: Vec::new() };
 
 	let mut region = Region::default();
-	region.state.active = true;
-	region.sample_data = sample1.clone();
+	region.state.position = Some(0);
+	region.set_sample_data(sample1.clone());
 	engine.regions.push(region);
 
 	let mut region = Region::default();
-	region.state.active = true;
-	region.sample_data = sample2.clone();
+	region.state.position = Some(0);
+	region.set_sample_data(sample2.clone());
 	engine.regions.push(region);
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -1052,8 +1083,8 @@ mod tests {
 
 	engine.process(&mut out_left, &mut out_right);
 
-	assert_eq!(engine.regions[0].state.active, false);
-	assert_eq!(engine.regions[1].state.active, false);
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
 
 	assert_eq!(out_left[0], 0.5);
 	assert_eq!(out_left[1], 0.0);
@@ -1063,4 +1094,113 @@ mod tests {
 	assert_eq!(out_right[1], 0.5);
 	assert_eq!(out_right[2], 1.0);
     }
+
+    #[test]
+    fn simple_note_on_off() {
+	let sample = vec![0.1, -0.1,
+			  0.2, -0.2,
+			  0.3, -0.3,
+			  0.4, -0.4,
+			  0.5, -0.5];
+	let mut engine = Engine { regions: Vec::new() };
+
+	let mut region = Region::default();
+	region.set_sample_data(sample.clone());
+
+	engine.regions.push(region);
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.0);
+	assert_eq!(out_right[0], -0.0);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.1);
+	assert_eq!(out_right[0], -0.1);
+
+    }
+
+
+
+    /*
+
+//    #[test]
+    fn region_group() {
+	let sample1 = vec![(0.1, -0.1), (0.1, -0.1), (0.1, -0.1), (0.1, -0.1), (0.1, -0.1)];
+	let sample2 = vec![(0.2, -0.2), (0.2, -0.2), (0.2, -0.2), (0.2, -0.2), (0.2, -0.2)];
+	let sample3 = vec![(0.3, -0.3), (0.3, -0.3), (0.3, -0.3), (0.3, -0.3), (0.3, -0.3)];
+
+	let mut engine = Engine { regions: Vec::new() };
+
+	let mut region = Region::default();
+	region.sample_data = sample1.clone();
+	region.set_group(1);
+
+	engine.regions.push(region);
+
+	let mut region = Region::default();
+	region.sample_data = sample2.clone();
+	region.set_group(1);
+
+	engine.regions.push(region);
+
+	let mut region = Region::default();
+	region.sample_data = sample3.clone();
+
+	engine.regions.push(region);
+
+	let mut out_left: [f32; 2] = [0.0, 0.0];
+	let mut out_right: [f32; 2] = [0.0, 0.0];
+
+	engine.regions[0].state.position = Some(0);
+	engine.regions[2].state.position = Some(0);
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.4);
+	assert_eq!(out_right[0], -0.4);
+	assert_eq!(out_left[1], 0.4);
+	assert_eq!(out_right[1], -0.4);
+
+	assert_eq!(engine.regions[0].state.position, Some(2));
+
+	let mut out_left: [f32; 2] = [0.0, 0.0];
+	let mut out_right: [f32; 2] = [0.0, 0.0];
+
+	engine.regions[1].state.position = Some(0);
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.5);
+	assert_eq!(out_right[0], -0.5);
+	assert_eq!(out_left[1], 0.5);
+	assert_eq!(out_right[1], -0.5);
+	assert_eq!(engine.regions[0].state.position, None);
+
+    }
+
+    fn make_test_sample(nsamples: u32, samplerate: f32, freq: f32) -> Vec<f32> {
+	let omega = freq/samplerate * 2.0*PI;
+	(0..nsamples).map(|t| ((omega * t as f32).sin())).collect()
+    }
+
+    fn test_calc_frequency(samplerate: f32, sample: Vec<f32>, test_freq: f32) -> bool {
+	let (zeros, _) = sample.iter().fold((0, 0.0), |(n, last), s| {
+	    if last * s < 0.0 {
+		(n + 1, *s)
+	    } else {
+		(n, *s)
+	    }
+	});
+
+	let zeros = zeros as f32;
+	let to_freq = samplerate/(sample.len() as f32);
+	zeros * to_freq < test_freq && (zeros + 1.0) * to_freq > test_freq
+    }
+
+*/
 }
