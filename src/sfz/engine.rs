@@ -1,4 +1,5 @@
-
+use std::fmt;
+use std::slice;
 
 use super::errors::*;
 
@@ -127,6 +128,16 @@ impl RandomRange {
     }
 }
 
+fn range_check<T: PartialOrd + fmt::Display>(v: T, lo: T, hi: T, name: &'static str) -> Result<T, RangeError> {
+    match v {
+	v if v >= lo && v <= hi => {
+	    Ok(v)
+	}
+	_ => Err(RangeError::out_of_range(name, lo, hi, v))
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Trigger {
     Attack,
@@ -143,30 +154,53 @@ impl Default for Trigger {
 }
 
 
-#[derive(Clone)]
-struct RegionState {
-    position: Option<usize>,
+#[derive(Default, Debug, Clone)]
+pub(super) struct ADSREnvelopeGenerator {
+    attack: f32,
+    hold: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32
 }
 
-impl Default for RegionState {
-    fn default() -> Self {
-	RegionState {
-	    position: None
-	}
+
+
+impl ADSREnvelopeGenerator {
+    pub(super) fn set_attack(&mut self, v: f32) -> Result<(), RangeError> {
+	self.attack = range_check(v, 0.0, 100.0, "ampeg_attack")?;
+	Ok(())
+    }
+    pub(super) fn set_hold(&mut self, v: f32) -> Result<(), RangeError> {
+	self.hold = range_check(v, 0.0, 100.0, "ampeg_hold")?;
+	Ok(())
+    }
+    pub(super) fn set_decay(&mut self, v: f32) -> Result<(), RangeError> {
+	self.decay = range_check(v, 0.0, 100.0, "ampeg_decay")?;
+	Ok(())
+    }
+    pub(super) fn set_sustain(&mut self, v: f32) -> Result<(), RangeError> {
+	self.sustain = range_check(v, 0.0, 100.0, "ampeg_sustain")? / 100.0;
+	Ok(())
+    }
+    pub(super) fn set_release(&mut self, v: f32) -> Result<(), RangeError> {
+	self.release = range_check(v, 0.0, 100.0, "ampeg_release")?;
+	Ok(())
     }
 }
 
+
 #[derive(Clone)]
-pub struct Region {
+pub struct RegionData {
     pub(super) key_range: NoteRange,
     pub(super) vel_range: VelRange,
+
+    pub(super) ampeg: ADSREnvelopeGenerator,
 
     pitch_keycenter: wmidi::Note,
 
     pitch_keytrack: f32,
 
     amp_veltrack: f32,
-    ampeg_release: f32,
 
     volume: f32,
 
@@ -184,16 +218,12 @@ pub struct Region {
     on_hi_cc: (u32, i32),
 
     pub(super) random_range: RandomRange,
-
-    sample_data: Vec<f32>,
-    state: RegionState
-
 }
 
 
-impl Default for Region {
+impl Default for RegionData {
     fn default() -> Self {
-	Region {
+	RegionData {
 	    key_range: Default::default(),
 	    vel_range: Default::default(),
 
@@ -201,8 +231,9 @@ impl Default for Region {
 
 	    pitch_keytrack: 100.0,
 
-	    ampeg_release: Default::default(),
 	    amp_veltrack: 1.0,
+
+	    ampeg: Default::default(),
 
 	    volume: Default::default(),
 	    sample: Default::default(),
@@ -217,52 +248,25 @@ impl Default for Region {
 	    on_hi_cc: (0, 0),
 
 	    random_range: Default::default(),
-
-	    sample_data: Vec::new(),
-	    state: Default::default()
 	}
     }
 }
 
-impl Region {
-    pub(super) fn set_amp_veltrack(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= -100 && v <= 100 => {
-		self.amp_veltrack = (v as f32) / 100.0;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("amp_veltrack", -100, 100, v))
-	}
-    }
-
-    pub(super) fn set_ampeg_release(&mut self, v: f32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= 0.0 && v <= 100.0 => {
-		self.ampeg_release = v as f32;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("ampeg_release", 0.0, 100.0, v))
-	}
+impl RegionData {
+    pub(super) fn set_amp_veltrack(&mut self, v: f32) -> Result<(), RangeError> {
+	self.amp_veltrack = range_check(v, -100.0, 100.0, "amp_veltrack")? / 100.0;
+	Ok(())
     }
 
     pub(super) fn set_pitch_keycenter(&mut self, v: u32) -> Result<(), RangeError> {
-	match v {
-	    v if v <= 127 => {
-		self.pitch_keycenter = unsafe { wmidi::Note::from_u8_unchecked(v as u8) };
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("pitch_center", 0, 127, v))
-	}
+	let v = range_check(v, 0, 127, "pich_keycenter")? as u8;
+	self.pitch_keycenter = unsafe { wmidi::Note::from_u8_unchecked(v as u8) };
+	Ok(())
     }
 
     pub(super) fn set_pitch_keytrack(&mut self, v: f32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= -1200.0 && v <= 1200.0 => {
-		self.pitch_keytrack = v;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("pitch_keytrack", -1200.0, 1200.0, v))
-	}
+	self.pitch_keytrack = range_check(v, -1200.0, 1200.0, "pitch_keytrack")?;
+	Ok(())
     }
 
     pub(super) fn set_sample(&mut self, v: &str) {
@@ -270,33 +274,18 @@ impl Region {
     }
 
     pub(super) fn set_rt_decay(&mut self, v: f32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= 0.0 && v <= 200.0 => {
-		self.rt_decay = v;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("rt_decay", 0.0, 200.0, v))
-	}
+	self.rt_decay = range_check(v, 0.0, 200.0, "rt_decay")?;
+	Ok(())
     }
 
     pub(super) fn set_tune(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= -100 && v <= 100 => {
-		self.tune = v as i8;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("tune", -100, 100, v))
-	}
+	self.tune = range_check(v, -100, 100, "tune")? as i8;
+	Ok(())
     }
 
     pub(super) fn set_volume(&mut self, v: f32) -> Result<(), RangeError> {
-	match v {
-	    v if v >= -144.6 && v <= 6.0 => {
-		self.volume = v;
-		Ok(())
-	    }
-	    _ => Err(RangeError::out_of_range("volume", -144.6, 6.0, v))
-	}
+	self.volume = range_check(v, -144.6, 6.0, "tune")?;
+	Ok(())
     }
 
     pub(super) fn set_trigger(&mut self, t: Trigger) {
@@ -318,9 +307,53 @@ impl Region {
     pub(super) fn set_on_hi_cc(&mut self, channel: u32, v: i32) {
 	self.on_hi_cc = (channel, v);
     }
+}
 
-    fn set_sample_data(&mut self,  sample_data: Vec<f32>) {
-	self.sample_data = sample_data
+
+#[derive(Clone)]
+struct RegionState {
+    position: Option<usize>,
+}
+
+impl Default for RegionState {
+    fn default() -> Self {
+	RegionState {
+	    position: None,
+	}
+    }
+}
+
+
+pub(super) struct Region {
+    params: RegionData,
+
+    sample_data: Vec<f32>,
+    state: RegionState,
+
+    real_sample_length: usize,
+    max_block_length: usize
+}
+
+impl Region {
+    fn new(params: RegionData, max_block_length: usize) -> Region {
+	Region {
+	    params: params,
+
+	    sample_data: Vec::new(),
+	    state: Default::default(),
+	    max_block_length: max_block_length,
+	    real_sample_length: 0,
+	}
+    }
+
+    fn set_sample_data(&mut self,  mut sample_data: Vec<f32>) {
+	let frames = sample_data.len() / 2;
+
+	let reserve_frames = ((frames / self.max_block_length) + 2) * self.max_block_length;
+
+	sample_data.resize(reserve_frames * 2, 0.0);
+	self.sample_data = sample_data;
+	self.real_sample_length = frames;
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
@@ -329,7 +362,7 @@ impl Region {
 	    None => return
 	};
 
-	let gain = utils::dB_to_gain(self.volume);
+	let gain = utils::dB_to_gain(self.params.volume);
 
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
 	    if position >= self.sample_data.len() {
@@ -344,7 +377,11 @@ impl Region {
 	    position += 2;
 	}
 
-	self.state.position = Some(position);
+	self.state.position = if position < self.real_sample_length * 2 {
+	    Some(position)
+	} else {
+	    None
+	}
     }
 
     fn is_active(&self) -> bool {
@@ -367,7 +404,18 @@ impl Region {
 
 
 pub struct Engine {
-    pub(super) regions: Vec<Region>
+    pub(super) regions: Vec<Region>,
+    max_block_length: usize
+}
+
+impl Engine {
+    fn new(reg_data: Vec<RegionData>, max_block_length: usize) -> Engine {
+
+	Engine {
+	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), max_block_length)).collect(),
+	    max_block_length: 1
+	}
+    }
 }
 
 impl engine::EngineTrait for Engine {
@@ -395,7 +443,7 @@ mod tests {
 
     #[test]
     fn region_data_default() {
-	let rd: Region = Default::default();
+	let rd: RegionData = Default::default();
 
 	assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 	assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
@@ -403,7 +451,7 @@ mod tests {
 	assert_eq!(rd.vel_range.lo, 0);
 
 	assert_eq!(rd.amp_veltrack, 1.0);
-	assert_eq!(rd.ampeg_release, 0.0);
+	assert_eq!(rd.ampeg.release, 0.0);
 	assert_eq!(rd.tune, 0)
     }
 
@@ -417,9 +465,9 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_region_line() {
-	let engine = parse_sfz_text("<region> hikey=42 lokey=23".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 1);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text("<region> hikey=42 lokey=23".to_string()).unwrap();
+	assert_eq!(regions.len(), 1);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
@@ -432,9 +480,9 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_notefmt_region_line() {
-	let engine = parse_sfz_text("<region> hikey=c#3 lokey=ab2 <region> hikey=c3 lokey=a2".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 2);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text("<region> hikey=c#3 lokey=ab2 <region> hikey=c3 lokey=a2".to_string()).unwrap();
+	assert_eq!(regions.len(), 2);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::GSharp1));
@@ -443,7 +491,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(1) {
+	match &regions.get(1) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::C2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::A1));
@@ -456,8 +504,8 @@ mod tests {
 
     #[test]
     fn parse_sfz_hikey_lokey_group_line() {
-	let engine = parse_sfz_text("<group> hivel=42 lovel=23".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 0);
+	let regions = parse_sfz_text("<group> hivel=42 lovel=23".to_string()).unwrap();
+	assert_eq!(regions.len(), 0);
     }
 
     #[test]
@@ -485,6 +533,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_ampeg() {
+	let regions = parse_sfz_text("<region> ampeg_attack=23 ampeg_hold=42 ampeg_decay=47 ampeg_sustain=11 ampeg_release=0.2342".to_string()).unwrap();
+	match regions.get(0) {
+	    Some(rd) => {
+		assert_eq!(rd.ampeg.attack, 23.0);
+		assert_eq!(rd.ampeg.hold, 42.0);
+		assert_eq!(rd.ampeg.decay, 47.0);
+		assert_eq!(rd.ampeg.sustain, 0.11);
+		assert_eq!(rd.ampeg.release, 0.2342);
+	    }
+	    None => panic!("expeted region with ampeg")
+	}
+    }
+
+    #[test]
     fn parse_out_of_range_amp_veltrack() {
 	match parse_sfz_text("<region> amp_veltrack=105 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "amp_veltrack out of range: -100 <= 105 <= 100"),
@@ -492,6 +555,70 @@ mod tests {
 	}
 	match parse_sfz_text("<region> amp_veltrack=-105 lokey=23".to_string()) {
 	    Err(e) => assert_eq!(format!("{}", e), "amp_veltrack out of range: -100 <= -105 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+    }
+
+    #[test]
+    fn parse_out_of_range_ampeg_attack() {
+	match parse_sfz_text("<region> ampeg_attack=105 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_attack out of range: 0 <= 105 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_attack=-20 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_attack out of range: 0 <= -20 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_attack=aa lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e),  "invalid float literal"),
+	    _ => panic!("Not seen expected error")
+	}
+    }
+
+        #[test]
+    fn parse_out_of_range_ampeg_hold() {
+	match parse_sfz_text("<region> ampeg_hold=105 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_hold out of range: 0 <= 105 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_hold=-20 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_hold out of range: 0 <= -20 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_hold=aa lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e),  "invalid float literal"),
+	    _ => panic!("Not seen expected error")
+	}
+    }
+
+    #[test]
+    fn parse_out_of_range_ampeg_decay() {
+	match parse_sfz_text("<region> ampeg_decay=105 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_decay out of range: 0 <= 105 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_decay=-20 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_decay out of range: 0 <= -20 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_decay=aa lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e),  "invalid float literal"),
+	    _ => panic!("Not seen expected error")
+	}
+    }
+
+    #[test]
+    fn parse_out_of_range_ampeg_sustain() {
+	match parse_sfz_text("<region> ampeg_sustain=105 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_sustain out of range: 0 <= 105 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_sustain=-20 lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e), "ampeg_sustain out of range: 0 <= -20 <= 100"),
+	    _ => panic!("Not seen expected error")
+	}
+	match parse_sfz_text("<region> ampeg_sustain=aa lokey=23".to_string()) {
+	    Err(e) => assert_eq!(format!("{}", e),  "invalid float literal"),
 	    _ => panic!("Not seen expected error")
 	}
     }
@@ -514,9 +641,9 @@ mod tests {
 
     #[test]
     fn parse_sfz_comment_in_line() {
-	let engine = parse_sfz_text("<region> hivel=42 lovel=23 // foo".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 1);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text("<region> hivel=42 lovel=23 // foo".to_string()).unwrap();
+	assert_eq!(regions.len(), 1);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
@@ -529,9 +656,9 @@ mod tests {
 
     #[test]
     fn parse_region_line_span() {
-	let engine = parse_sfz_text("<region> hivel=42 lovel=23 \n hikey=43 lokey=24".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 1);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text("<region> hivel=42 lovel=23 \n hikey=43 lokey=24".to_string()).unwrap();
+	assert_eq!(regions.len(), 1);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
@@ -544,9 +671,9 @@ mod tests {
 
     #[test]
     fn parse_region_line_span_with_coment() {
-	let engine = parse_sfz_text("<region> hivel=42 lovel=23 // foo bar foo\nhikey=43 lokey=24".to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 1);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text("<region> hivel=42 lovel=23 // foo bar foo\nhikey=43 lokey=24".to_string()).unwrap();
+	assert_eq!(regions.len(), 1);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
@@ -561,8 +688,8 @@ mod tests {
     fn parse_two_region_line() {
 	let s = "<region> hivel=41 lovel=22 <region> hikey=42 lokey=23";
 
-	let engine = parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 2)
+	let regions = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(regions.len(), 2)
     }
 
     #[test]
@@ -572,16 +699,16 @@ mod tests {
 <region> lovel=23
 <region> lovel=21
 ";
-	let engine = parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 2);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(regions.len(), 2);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 23)
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(1) {
+	match &regions.get(1) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 21)
@@ -602,9 +729,9 @@ mod tests {
 <region> hikey=43 hivel=42 lokey=23
 <region> lovel=23
 ";
-	let engine = parse_sfz_text(s.to_string()).unwrap();
-	assert_eq!(engine.regions.len(), 6);
-	match &engine.regions.get(0) {
+	let regions = parse_sfz_text(s.to_string()).unwrap();
+	assert_eq!(regions.len(), 6);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 0);
@@ -613,7 +740,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(1) {
+	match &regions.get(1) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 21);
@@ -622,7 +749,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(2) {
+	match &regions.get(2) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 41);
 		assert_eq!(rd.vel_range.lo, 0);
@@ -631,7 +758,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(3) {
+	match &regions.get(3) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 41);
 		assert_eq!(rd.vel_range.lo, 21);
@@ -640,7 +767,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(4) {
+	match &regions.get(4) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 42);
 		assert_eq!(rd.vel_range.lo, 0);
@@ -649,7 +776,7 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(5) {
+	match &regions.get(5) {
 	    Some(rd) => {
 		assert_eq!(rd.vel_range.hi, 41);
 		assert_eq!(rd.vel_range.lo, 23);
@@ -710,13 +837,13 @@ mod tests {
 <region> sample=48khz24bit\pedalU2.wav lorand=0.5 hirand=1
 
 "#;
-	let engine = parse_sfz_text(s.to_string()).unwrap();
+	let regions = parse_sfz_text(s.to_string()).unwrap();
 
-	assert_eq!(engine.regions.len(), 12);
-	match &engine.regions.get(0) {
+	assert_eq!(regions.len(), 12);
+	match &regions.get(0) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
-		assert_eq!(rd.ampeg_release, 1.0);
+		assert_eq!(rd.ampeg.release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
 		assert_eq!(rd.tune, 10);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
@@ -737,10 +864,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(1) {
+	match &regions.get(1) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
-		assert_eq!(rd.ampeg_release, 1.0);
+		assert_eq!(rd.ampeg.release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
 		assert_eq!(rd.tune, 10);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
@@ -761,10 +888,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(2) {
+	match &regions.get(2) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
-		assert_eq!(rd.ampeg_release, 5.0);
+		assert_eq!(rd.ampeg.release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
 		assert_eq!(rd.tune, -13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
@@ -785,10 +912,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(3) {
+	match &regions.get(3) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.73);
-		assert_eq!(rd.ampeg_release, 5.0);
+		assert_eq!(rd.ampeg.release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
 		assert_eq!(rd.tune, -13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
@@ -809,10 +936,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(4) {
+	match &regions.get(4) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.94);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
@@ -833,10 +960,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(5) {
+	match &regions.get(5) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.94);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C0);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db0));
@@ -857,10 +984,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(6) {
+	match &regions.get(6) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::AMinus1));
@@ -881,10 +1008,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(7) {
+	match &regions.get(7) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 0.82);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::ASharpMinus1));
@@ -905,10 +1032,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(8) {
+	match &regions.get(8) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
@@ -929,10 +1056,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(9) {
+	match &regions.get(9) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
@@ -953,10 +1080,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(10) {
+	match &regions.get(10) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
@@ -977,10 +1104,10 @@ mod tests {
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
-	match &engine.regions.get(11) {
+	match &regions.get(11) {
 	    Some(rd) => {
 		assert_eq!(rd.amp_veltrack, 1.0);
-		assert_eq!(rd.ampeg_release, 0.0);
+		assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
@@ -1004,47 +1131,67 @@ mod tests {
     }
 
     #[test]
+    fn region_sample_data() {
+	let sample = vec![1.0, 0.5,
+			  0.5, 1.0,
+			  1.0, 0.5];
+
+	let mut region = Region::new(RegionData::default(), 16);
+
+	region.set_sample_data(sample);
+
+	assert_eq!(region.sample_data.len(), 64);
+    }
+
+    #[test]
     fn simple_region_process() {
 	let sample = vec![1.0, 0.5,
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let mut region = Region::default();
-	region.state.position = Some(0);
+	let mut region = Region::new(RegionData::default(), 8);
+	region.set_sample_data(sample);
 
-	region.set_sample_data(sample.clone());
+	region.activate();
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
 
 	region.process(&mut out_left, &mut out_right);
-	assert!(region.is_active());
 	assert_eq!(out_left[0], 1.0);
 	assert_eq!(out_left[1], 0.5);
 
 	assert_eq!(out_right[0], 0.5);
 	assert_eq!(out_right[1], 1.0);
 
+	assert!(region.is_active());
+
 	let mut out_left: [f32; 2] = [-0.5, -0.2];
 	let mut out_right: [f32; 2] = [-0.2, -0.5];
 
 	region.process(&mut out_left, &mut out_right);
-	assert!(!region.is_active());
 	assert_eq!(out_left[0], 0.5);
 	assert_eq!(out_left[1], -0.2);
 
 	assert_eq!(out_right[0], 0.3);
 	assert_eq!(out_right[1], -0.5);
+
+	assert!(!region.is_active());
     }
+
+
 
     #[test]
     fn region_volume_process() {
 	let sample = vec![1.0, 1.0];
 
-	let mut region = Region::default();
-	region.state.position = Some(0);
+	let mut region_data = RegionData::default();
+	region_data.set_volume(-20.0).unwrap();
+
+	let mut region = Region::new(region_data, 8);
 	region.set_sample_data(sample.clone());
-	region.set_volume(-20.0).unwrap();
+
+	region.activate();
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1055,7 +1202,6 @@ mod tests {
 	assert_eq!(out_right[0], 0.1);
     }
 
-
     #[test]
     fn simple_engine_process() {
 	let sample1 = vec![1.0, 0.5,
@@ -1065,21 +1211,15 @@ mod tests {
 			   -0.5, -0.5,
 			   0.0, 0.5];
 
-	let mut engine = Engine { regions: Vec::new() };
+	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 16);
 
-	let mut region = Region::default();
-	region.state.position = Some(0);
-	region.set_sample_data(sample1.clone());
-	engine.regions.push(region);
-
-	let mut region = Region::default();
-	region.state.position = Some(0);
-	region.set_sample_data(sample2.clone());
-	engine.regions.push(region);
+	engine.regions[0].set_sample_data(sample1);
+	engine.regions[0].activate();
+	engine.regions[1].set_sample_data(sample2);
+	engine.regions[1].activate();
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 	let mut out_right: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
-
 
 	engine.process(&mut out_left, &mut out_right);
 
@@ -1095,6 +1235,9 @@ mod tests {
 	assert_eq!(out_right[2], 1.0);
     }
 
+
+
+    /*
     #[test]
     fn simple_note_on_off() {
 	let sample = vec![0.1, -0.1,
@@ -1104,7 +1247,7 @@ mod tests {
 			  0.5, -0.5];
 	let mut engine = Engine { regions: Vec::new() };
 
-	let mut region = Region::default();
+	let mut region = Region::new(RegionData::default());
 	region.set_sample_data(sample.clone());
 
 	engine.regions.push(region);
@@ -1128,7 +1271,7 @@ mod tests {
 
 
 
-    /*
+
 
 //    #[test]
     fn region_group() {

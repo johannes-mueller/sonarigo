@@ -198,7 +198,7 @@ fn parse_opcode(chars: &mut Chars) -> Result<(Option<(String, String)>, NextChar
 
 
 
-fn take_opcode(region: &mut engine::Region, key: &str, value: &str) -> Result<(), ParserError> {
+fn take_opcode(region: &mut engine::RegionData, key: &str, value: &str) -> Result<(), ParserError> {
     match key {
 	"lokey" => region.key_range.set_lo(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
 	"hikey" => region.key_range.set_hi(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
@@ -211,8 +211,12 @@ fn take_opcode(region: &mut engine::Region, key: &str, value: &str) -> Result<()
 	"volume" => region.set_volume(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"rt_decay" => region.set_rt_decay(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"pitch_keytrack" => region.set_pitch_keytrack(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
-	"amp_veltrack" => region.set_amp_veltrack(value.parse::<i32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
-	"ampeg_release" => region.set_ampeg_release(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"amp_veltrack" => region.set_amp_veltrack(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"ampeg_attack" => region.ampeg.set_attack(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"ampeg_hold" => region.ampeg.set_hold(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"ampeg_decay" => region.ampeg.set_decay(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"ampeg_sustain" => region.ampeg.set_sustain(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"ampeg_release" => region.ampeg.set_release(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"group" => { region.set_group(value.parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?); Ok(()) },
 	"off_by" => { region.set_off_by(value.parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?); Ok(()) },
 	"sample" => { region.set_sample(value); Ok(()) },
@@ -253,7 +257,7 @@ fn parse_trigger(s: &str) -> Result<engine::Trigger, ParserError> {
 }
 
 
-fn parse_region(chars: &mut Chars, mut region: engine::Region) -> Result<(engine::Region, NextChar), ParserError> {
+fn parse_region(chars: &mut Chars, mut region: engine::RegionData) -> Result<(engine::RegionData, NextChar), ParserError> {
 
     let nc = loop {
 	match parse_opcode(chars) {
@@ -276,10 +280,10 @@ fn parse_region(chars: &mut Chars, mut region: engine::Region) -> Result<(engine
     Ok((region, nc))
 }
 
-pub(super) fn parse_sfz_text(text: String) -> Result<engine::Engine, ParserError> {
+pub(super) fn parse_sfz_text(text: String) -> Result<Vec<engine::RegionData>, ParserError> {
     let mut chars = text.chars();
 
-    let mut current_group = engine::Region::default();
+    let mut current_group = engine::RegionData::default();
 
     let mut regions = vec![];
 
@@ -293,7 +297,7 @@ pub(super) fn parse_sfz_text(text: String) -> Result<engine::Engine, ParserError
 
 	let nc = match header_string.trim() {
 	    "group" => {
-		let (grp, nc) = parse_region(&mut chars, engine::Region::default())?;
+		let (grp, nc) = parse_region(&mut chars, engine::RegionData::default())?;
 		current_group = grp;
 		nc
 	    }
@@ -311,7 +315,5 @@ pub(super) fn parse_sfz_text(text: String) -> Result<engine::Engine, ParserError
 	}
     }
 
-    Ok(engine::Engine {
-	regions: regions
-    })
+    Ok(regions)
 }
