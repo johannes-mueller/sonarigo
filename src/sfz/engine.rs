@@ -154,13 +154,25 @@ impl Default for Trigger {
 }
 
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct ADSREnvelopeGenerator {
     attack: f32,
     hold: f32,
     decay: f32,
     sustain: f32,
     release: f32
+}
+
+impl Default for ADSREnvelopeGenerator {
+    fn default() -> Self {
+	ADSREnvelopeGenerator {
+	    attack: 0.0 ,
+	    hold: 0.0 ,
+	    decay: 0.0 ,
+	    sustain: 1.0 ,
+	    release: 0.0
+	}
+    }
 }
 
 
@@ -185,6 +197,51 @@ impl ADSREnvelopeGenerator {
     pub(super) fn set_release(&mut self, v: f32) -> Result<(), RangeError> {
 	self.release = range_check(v, 0.0, 100.0, "ampeg_release")?;
 	Ok(())
+    }
+
+    fn ads_envelope(&self, samplerate: f32, max_block_length: usize) -> Vec<f32> {
+	let needed_samples = ((self.attack + self.hold + 2.0*self.decay) as f32 * samplerate).round() as usize;
+	let length = ((needed_samples / max_block_length) + 2) * max_block_length;
+
+	let mut env = Vec::with_capacity(length);
+	env.resize(length, 0.0);
+
+	let decay_step = (-8.0/(samplerate*self.decay)).exp();
+	let mut time = 0;
+	let mut last = 1.0 - self.sustain;
+
+	for e in env.iter_mut() {
+	    *e = match time as f32 / samplerate {
+		t if t < self.attack
+		    => t/self.attack,
+		t if t < self.attack + self.hold
+		    => 1.0,
+		t if t < self.attack + self.hold + 2.0*self.decay => {
+		    let res = self.sustain + last;
+		    last *= decay_step;
+		    res
+		}
+		_ => self.sustain
+	    };
+	    time += 1;
+	}
+	env
+    }
+
+    fn release_envelope(&self, samplerate: f32, nsamples: usize) -> Vec<f32> {
+	let mut env = Vec::with_capacity(nsamples);
+	env.resize(nsamples, 0.0);
+
+	let release_step = (-8.0/(samplerate*self.release)).exp();
+	let mut time = 0;
+	let mut last = self.sustain;
+
+	for e in env.iter_mut() {
+	    *e = last;
+	    last *= release_step;
+	}
+
+	env
     }
 }
 
@@ -312,13 +369,15 @@ impl RegionData {
 
 #[derive(Clone)]
 struct RegionState {
-    position: Option<usize>,
+    sample_position: Option<usize>,
+    ampeg_position: usize
 }
 
 impl Default for RegionState {
     fn default() -> Self {
 	RegionState {
-	    position: None,
+	    sample_position: None,
+	    ampeg_position: 0,
 	}
     }
 }
@@ -330,17 +389,26 @@ pub(super) struct Region {
     sample_data: Vec<f32>,
     state: RegionState,
 
+    ampeg: Vec<f32>,
+
+    samplerate: f32,
     real_sample_length: usize,
     max_block_length: usize
 }
 
 impl Region {
-    fn new(params: RegionData, max_block_length: usize) -> Region {
+    fn new(params: RegionData, samplerate: f32, max_block_length: usize) -> Region {
+	let ampeg = params.ampeg.ads_envelope(samplerate, max_block_length);
+
 	Region {
 	    params: params,
 
 	    sample_data: Vec::new(),
 	    state: Default::default(),
+
+	    ampeg: ampeg,
+
+	    samplerate: samplerate,
 	    max_block_length: max_block_length,
 	    real_sample_length: 0,
 	}
@@ -357,7 +425,7 @@ impl Region {
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
-	let mut position = match self.state.position {
+	let mut position = match self.state.sample_position {
 	    Some(p) => p,
 	    None => return
 	};
@@ -365,19 +433,18 @@ impl Region {
 	let gain = utils::dB_to_gain(self.params.volume);
 
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
-	    if position >= self.sample_data.len() {
-		self.state.position = None;
-		return;
-	    }
 	    let sl = self.sample_data[position];
 	    let sr = self.sample_data[position+1];
-	    *l += sl * gain;
-	    *r += sr * gain;
+	    let ampeg = self.ampeg[self.state.ampeg_position];
+
+	    *l += sl * gain * ampeg;
+	    *r += sr * gain * ampeg;
 
 	    position += 2;
+	    self.state.ampeg_position += 1;
 	}
 
-	self.state.position = if position < self.real_sample_length * 2 {
+	self.state.sample_position = if position < self.real_sample_length * 2 {
 	    Some(position)
 	} else {
 	    None
@@ -385,12 +452,13 @@ impl Region {
     }
 
     fn is_active(&self) -> bool {
-	self.state.position.is_some()
+	self.state.sample_position.is_some()
     }
 
     fn activate(&mut self) {
 	if !self.is_active() {
-	    self.state.position = Some(0);
+	    self.state.sample_position = Some(0);
+	    self.state.ampeg_position = 0;
 	}
     }
 
@@ -405,14 +473,15 @@ impl Region {
 
 pub struct Engine {
     pub(super) regions: Vec<Region>,
+    samplerate: f32,
     max_block_length: usize
 }
 
 impl Engine {
-    fn new(reg_data: Vec<RegionData>, max_block_length: usize) -> Engine {
-
+    fn new(reg_data: Vec<RegionData>, samplerate: f32, max_block_length: usize) -> Engine {
 	Engine {
-	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), max_block_length)).collect(),
+	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), samplerate, max_block_length)).collect(),
+	    samplerate: samplerate,
 	    max_block_length: 1
 	}
     }
@@ -451,7 +520,7 @@ mod tests {
 	assert_eq!(rd.vel_range.lo, 0);
 
 	assert_eq!(rd.amp_veltrack, 1.0);
-	assert_eq!(rd.ampeg.release, 0.0);
+	assert_eq!(rd.ampeg.sustain, 1.0);
 	assert_eq!(rd.tune, 0)
     }
 
@@ -1131,12 +1200,33 @@ mod tests {
     }
 
     #[test]
+    fn generate_adsr_envelope() {
+	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
+	let region = regions.get(0).unwrap();
+
+	let ads: Vec<f32> = region.ampeg.ads_envelope(1.0, 12)[..12].iter().map(|v| (v*100.0).round()/100.0).collect();
+	assert_eq!(ads.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6]);
+
+	let rel: Vec<f32> = region.ampeg.release_envelope(1.0, 8).iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(rel.as_slice(), [0.6,
+				    0.1211,
+				    0.0245,
+				    0.0049,
+				    0.0010,
+				    0.0002,
+				    0.0,
+				    0.0
+	]);
+
+    }
+
+    #[test]
     fn region_sample_data() {
 	let sample = vec![1.0, 0.5,
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let mut region = Region::new(RegionData::default(), 16);
+	let mut region = Region::new(RegionData::default(), 1.0, 16);
 
 	region.set_sample_data(sample);
 
@@ -1149,7 +1239,7 @@ mod tests {
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let mut region = Region::new(RegionData::default(), 8);
+	let mut region = Region::new(RegionData::default(), 1.0, 8);
 	region.set_sample_data(sample);
 
 	region.activate();
@@ -1179,8 +1269,6 @@ mod tests {
 	assert!(!region.is_active());
     }
 
-
-
     #[test]
     fn region_volume_process() {
 	let sample = vec![1.0, 1.0];
@@ -1188,7 +1276,7 @@ mod tests {
 	let mut region_data = RegionData::default();
 	region_data.set_volume(-20.0).unwrap();
 
-	let mut region = Region::new(region_data, 8);
+	let mut region = Region::new(region_data, 1.0, 8);
 	region.set_sample_data(sample.clone());
 
 	region.activate();
@@ -1203,6 +1291,26 @@ mod tests {
     }
 
     #[test]
+    fn region_amp_envelope_process() {
+	let mut sample = vec![];
+	sample.resize(32, 1.0);
+	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
+
+	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 16);
+	region.set_sample_data(sample.clone());
+	region.activate();
+
+	let mut out_left: [f32; 12] = [0.0; 12];
+	let mut out_right: [f32; 12] = [0.0; 12];
+
+	region.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
+	assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6]);
+
+    }
+
+    #[test]
     fn simple_engine_process() {
 	let sample1 = vec![1.0, 0.5,
 			   0.5, 1.0,
@@ -1211,7 +1319,7 @@ mod tests {
 			   -0.5, -0.5,
 			   0.0, 0.5];
 
-	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 16);
+	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
 
 	engine.regions[0].set_sample_data(sample1);
 	engine.regions[0].activate();
