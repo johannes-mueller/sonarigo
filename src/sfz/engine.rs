@@ -390,6 +390,8 @@ pub(super) struct Region {
     sample_data: Vec<f32>,
     state: RegionState,
 
+    velocity_amp: f32,
+
     ampeg: Vec<f32>,
     ampeg_release: Vec<f32>,
 
@@ -408,6 +410,8 @@ impl Region {
 
 	    sample_data: Vec::new(),
 	    state: Default::default(),
+
+	    velocity_amp: 1.0,
 
 	    ampeg: ampeg,
 	    ampeg_release: ampeg_release,
@@ -434,7 +438,7 @@ impl Region {
 	    None => return
 	};
 
-	let gain = utils::dB_to_gain(self.params.volume);
+	let gain = utils::dB_to_gain(self.params.volume) * self.velocity_amp;
 
 	let (envelope, mut env_position) = match self.state.ampeg_release_position {
 	    Some(p) => (&self.ampeg_release, p),
@@ -469,12 +473,17 @@ impl Region {
 	self.state.sample_position.is_some()
     }
 
-    fn note_on(&mut self) {
-	if !self.is_active() {
-	    self.state.sample_position = Some(0);
-	    self.state.ampeg_position = 0;
-	    self.state.ampeg_release_position = None;
+    fn note_on(&mut self, velocity: u8) {
+	if self.is_active() {
+	    return;
 	}
+
+	self.velocity_amp = velocity as f32 / 127.0;
+
+	self.state.sample_position = Some(0);
+	self.state.ampeg_position = 0;
+	self.state.ampeg_release_position = None;
+
     }
 
     fn note_off(&mut self) {
@@ -485,7 +494,7 @@ impl Region {
 
     fn pass_midi_msg(&mut self, midi_msg: &wmidi::MidiMessage) {
 	match midi_msg {
-	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.note_on(),
+	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.note_on(u8::from(*vel)),
 	    wmidi::MidiMessage::NoteOff(_ch, note, vel) => self.note_off(),
 	    _ => {}
 	}
@@ -1255,7 +1264,7 @@ mod tests {
 	let mut region = Region::new(RegionData::default(), 1.0, 8);
 	region.set_sample_data(sample);
 
-	region.note_on();
+	region.note_on(127);
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1292,7 +1301,7 @@ mod tests {
 	let mut region = Region::new(region_data, 1.0, 8);
 	region.set_sample_data(sample.clone());
 
-	region.note_on();
+	region.note_on(127);
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1311,7 +1320,7 @@ mod tests {
 
 	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 16);
 	region.set_sample_data(sample.clone());
-	region.note_on();
+	region.note_on(127);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -1334,9 +1343,9 @@ mod tests {
 	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
 
 	engine.regions[0].set_sample_data(sample1);
-	engine.regions[0].note_on();
+	engine.regions[0].note_on(127);
 	engine.regions[1].set_sample_data(sample2);
-	engine.regions[1].note_on();
+	engine.regions[1].note_on(127);
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 	let mut out_right: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -1434,6 +1443,27 @@ mod tests {
 
 	let rel: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
 	assert_eq!(rel.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
+    }
+
+
+    #[test]
+    fn note_on_velocity() {
+	let mut sample = vec![1.0, 1.0];
+
+	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1,
+						      wmidi::Note::C3,
+						      unsafe { wmidi::Velocity::from_unchecked(63) }));
+
+	engine.regions[0].set_sample_data(sample.clone());
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	engine.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], 0.49606299212598425197);
+	assert_eq!(out_right[0], 0.49606299212598425197);
     }
 
     /*
