@@ -1,5 +1,6 @@
 use std::fmt;
 use std::slice;
+use std::collections::HashSet;
 
 use itertools::izip;
 
@@ -288,7 +289,10 @@ pub(super) struct Region {
 
     samplerate: f32,
     real_sample_length: usize,
-    max_block_length: usize
+    max_block_length: usize,
+
+    last_velocity: Option<u8>,
+    other_notes_on: HashSet<u8>
 }
 
 impl Region {
@@ -309,6 +313,9 @@ impl Region {
 	    samplerate: samplerate,
 	    max_block_length: max_block_length,
 	    real_sample_length: 0,
+
+	    last_velocity: None,
+	    other_notes_on: HashSet::new()
 	}
     }
 
@@ -363,14 +370,40 @@ impl Region {
 
     fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
 	if !self.params.key_range.covering(note) {
+	    self.other_notes_on.insert(u8::from(note));
 	    return;
 	}
-	self.note_on(u8::from(velocity));
+
+	let velocity = u8::from(velocity);
+
+	match self.params.trigger {
+	    Trigger::Release => {
+		self.last_velocity = Some(velocity);
+		return
+	    }
+	    Trigger::First => {
+		if !self.other_notes_on.is_empty() {
+		    return;
+		}
+	    }
+	    Trigger::Legato => {
+		if self.other_notes_on.is_empty() {
+		    return;
+		}
+	    }
+	    _ => {}
+	}
+	self.note_on(velocity);
     }
 
     fn handle_note_off(&mut self, note: wmidi::Note) {
-	if self.params.key_range.covering(note) {
-	    self.note_off();
+	if !self.params.key_range.covering(note) {
+	    self.other_notes_on.remove(&u8::from(note));
+	    return;
+	}
+	match self.params.trigger {
+	    Trigger::Release => self.last_velocity.map_or((), |v| self.note_on(v)),
+	    _ => self.note_off()
 	}
     }
 
@@ -1302,6 +1335,87 @@ mod tests {
     }
 
 
+    #[test]
+    fn note_trigger_release() {
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::Release);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert!(region.is_active());
+	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+    }
+
+    #[test]
+    fn note_trigger_first() {
+	let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::First);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(region.is_active());
+
+    	let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::First);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(!region.is_active());
+
+        let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::First);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(region.is_active());
+    }
+
+    #[test]
+    fn note_trigger_legato() {
+	let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::Legato);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(!region.is_active());
+
+    	let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::Legato);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(region.is_active());
+
+        let mut rd = RegionData::default();
+	rd.key_range.set_hi(60).unwrap();
+	rd.key_range.set_lo(60).unwrap();
+	rd.set_trigger(Trigger::Legato);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(!region.is_active());
+    }
+
+
 
     #[test]
     fn simple_note_on_off() {
@@ -1542,6 +1656,7 @@ mod tests {
 	    assert_f32_eq(out_right[0], 0.0);
 	}
     }
+
     /*
 
 
