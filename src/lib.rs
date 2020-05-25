@@ -5,6 +5,6 @@ extern crate log;
 mod sfz;
 mod engine;
 mod sample;
-mod adsr_eg;
+mod envelopes;
 mod errors;
 mod utils;

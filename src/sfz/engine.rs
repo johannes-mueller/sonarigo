@@ -7,7 +7,7 @@ use itertools::izip;
 use crate::errors::*;
 use crate::engine;
 use crate::sample;
-use crate::adsr_eg as envelopes;
+use crate::envelopes;
 use crate::utils;
 
 #[derive(Clone, Copy)]
