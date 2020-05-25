@@ -65,3 +65,14 @@ impl fmt::Display for RangeError {
 impl error::Error for RangeError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> { None }
 }
+
+
+
+pub fn range_check<T: PartialOrd + fmt::Display>(v: T, lo: T, hi: T, name: &'static str) -> Result<T, RangeError> {
+    match v {
+	v if v >= lo && v <= hi => {
+	    Ok(v)
+	}
+	_ => Err(RangeError::out_of_range(name, lo, hi, v))
+    }
+}

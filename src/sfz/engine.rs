@@ -1,10 +1,11 @@
 use std::fmt;
 use std::slice;
 
+use itertools::izip;
+
 use crate::errors::*;
-
-
 use crate::engine;
+use crate::sample;
 use crate::adsr_eg as envelopes;
 use crate::utils;
 
@@ -276,25 +277,10 @@ impl RegionData {
 }
 
 
-#[derive(Clone)]
-struct RegionState {
-    sample_position: Option<usize>,
-}
-
-impl Default for RegionState {
-    fn default() -> Self {
-	RegionState {
-	    sample_position: None,
-	}
-    }
-}
-
-
 pub(super) struct Region {
     params: RegionData,
 
-    sample_data: Vec<f32>,
-    state: RegionState,
+    sample: sample::Sample,
 
     amp_envelope: envelopes::ADSREnvelope,
 
@@ -313,8 +299,8 @@ impl Region {
 	Region {
 	    params: params,
 
-	    sample_data: Vec::new(),
-	    state: Default::default(),
+	    // FIXME: should be initialized
+	    sample: sample::Sample::new(Vec::new(), samplerate, max_block_length),
 
 	    velocity_amp: 1.0,
 
@@ -326,48 +312,35 @@ impl Region {
 	}
     }
 
+    // # should be done in ::new()
     fn set_sample_data(&mut self,  mut sample_data: Vec<f32>) {
-	let frames = sample_data.len() / 2;
-
-	let reserve_frames = ((frames / self.max_block_length) + 2) * self.max_block_length;
-
-	sample_data.resize(reserve_frames * 2, 0.0);
-	self.sample_data = sample_data;
-	self.real_sample_length = frames;
+	self.sample = sample::Sample::new(sample_data, self.samplerate, self.max_block_length);
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
-	let mut position = match self.state.sample_position {
-	    Some(p) => p,
-	    None => return
-	};
+	if !(self.sample.is_playing() && self.amp_envelope.is_playing_or_releasing()) {
+	    return;
+	}
 
 	let gain = utils::dB_to_gain(self.params.volume) * self.velocity_amp;
 
 	let (envelope, mut env_position) = self.amp_envelope.active_envelope();
 
-	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
-	    let sl = self.sample_data[position];
-	    let sr = self.sample_data[position+1];
+	let sample_iterator = self.sample.iter();
 
+	for (l, r, (sl, sr)) in izip!(out_left.iter_mut(), out_right.iter_mut(), sample_iterator) {
 	    *l += sl * gain * envelope[env_position];
 	    *r += sr * gain * envelope[env_position];
 
-	    position += 2;
 	    env_position += 1;
 	}
 
 	self.amp_envelope.update(env_position);
 
-	self.state.sample_position = if position < self.real_sample_length * 2 {
-	    Some(position)
-	} else {
-	    None
-	}
     }
 
     fn is_active(&self) -> bool {
-	self.state.sample_position.is_some()
+	self.sample.is_playing() && self.amp_envelope.is_playing()
     }
 
     fn note_on(&mut self, velocity: u8) {
@@ -377,8 +350,7 @@ impl Region {
 
 	self.velocity_amp = velocity as f32 / 127.0;
 
-	self.state.sample_position = Some(0);
-
+	self.sample.note_on();
 	self.amp_envelope.note_on();
 
     }
@@ -393,7 +365,6 @@ impl Region {
 	if !self.params.key_range.covering(note) {
 	    return;
 	}
-
 	self.note_on(u8::from(velocity));
     }
 
@@ -451,6 +422,12 @@ mod tests {
     use crate::engine::EngineTrait;
 
     use std::f32::consts::PI;
+
+    fn assert_f32_eq(a: f32, b: f32) {
+	if (a - b).abs() > f32::EPSILON {
+	    panic!("float equivalence check failed, a: {}, b: {}", a, b);
+	}
+    }
 
     #[test]
     fn region_data_default() {
@@ -1162,19 +1139,6 @@ mod tests {
     */
 
     #[test]
-    fn region_sample_data() {
-	let sample = vec![1.0, 0.5,
-			  0.5, 1.0,
-			  1.0, 0.5];
-
-	let mut region = Region::new(RegionData::default(), 1.0, 16);
-
-	region.set_sample_data(sample);
-
-	assert_eq!(region.sample_data.len(), 64);
-    }
-
-    #[test]
     fn simple_region_process() {
 	let sample = vec![1.0, 0.5,
 			  0.5, 1.0,
@@ -1412,11 +1376,11 @@ mod tests {
 
 	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
 
+	engine.regions[0].set_sample_data(sample.clone());
+
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1,
 						      wmidi::Note::C3,
 						      unsafe { wmidi::Velocity::from_unchecked(63) }));
-
-	engine.regions[0].set_sample_data(sample.clone());
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -1446,9 +1410,10 @@ mod tests {
 	assert_eq!(out_left[0], 0.0);
 	assert_eq!(out_right[0], 0.0);
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
 	engine.regions[0].set_sample_data(sample.clone());
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -1459,8 +1424,6 @@ mod tests {
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 
-	engine.regions[0].set_sample_data(sample.clone());
-
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
 
@@ -1469,12 +1432,12 @@ mod tests {
 	assert_eq!(out_right[0], 0.5);
     }
 
-//    #[test]
-    fn note_on_off_mutiple_regions() {
-	let mut sample1 = vec![ 0.1; 12];
-	let mut sample2 = vec![ 0.2; 12];
-	let mut sample3 = vec![ 0.3; 12];
-	let mut sample4 = vec![-0.8; 12];
+    #[test]
+    fn note_on_off_multiple_regions() {
+	let mut sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
+	let mut sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
+	let mut sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
+	let mut sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
 
 	let region_text = "
 <region> lokey=a3 hikey=a3
@@ -1491,87 +1454,80 @@ mod tests {
 	engine.regions[2].set_sample_data(sample3.clone());
 	engine.regions[3].set_sample_data(sample4.clone());
 
+	for _ in 0..2 {
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 0.0);
+	    assert_f32_eq(out_right[0], 0.0);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.0);
-	assert_eq!(out_right[0], 0.0);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 1e1);
+	    assert_f32_eq(out_right[0], 1e2);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.1);
-	assert_eq!(out_right[0], 0.1);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], -7e3);
+	    assert_f32_eq(out_right[0], -7e4);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], -0.7);
-	assert_eq!(out_right[0], -0.7);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], -1e5);
+	    assert_f32_eq(out_right[0], -1e6);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], -0.5);
-	assert_eq!(out_right[0], -0.5);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], -2e-1);
+	    assert_f32_eq(out_right[0], -2e-2);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], -0.6);
-	assert_eq!(out_right[0], -0.6);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 6e-3);
+	    assert_f32_eq(out_right[0], 6e-4);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.2);
-	assert_eq!(out_right[0], 0.2);
+	    // no effect because sustaining
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 6e-5);
+	    assert_f32_eq(out_right[0], 6e-6);
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.5);
-	assert_eq!(out_right[0], 0.5);
+	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
 
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
-
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.3);
-	assert_eq!(out_right[0], 0.3);
-
-	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
-
-	let mut out_left: [f32; 1] = [0.0];
-	let mut out_right: [f32; 1] = [0.0];
-
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.0);
-	assert_eq!(out_right[0], 0.0);
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 0.0);
+	    assert_f32_eq(out_right[0], 0.0);
+	}
     }
     /*
 

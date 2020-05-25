@@ -24,7 +24,10 @@ impl Default for Generator {
     }
 }
 
-
+fn calc_needed_samples(length: f32, samplerate: f32, max_block_length: usize) -> usize {
+    let needed_samples = (length * samplerate).round() as usize;
+    ((needed_samples / max_block_length) + 2) * max_block_length
+}
 
 impl Generator {
     pub(crate) fn set_attack(&mut self, v: f32) -> Result<(), RangeError> {
@@ -49,8 +52,7 @@ impl Generator {
     }
 
     fn ads_envelope(&self, samplerate: f32, max_block_length: usize) -> Vec<f32> {
-	let needed_samples = ((self.attack + self.hold + 2.0*self.decay) as f32 * samplerate).round() as usize;
-	let length = ((needed_samples / max_block_length) + 2) * max_block_length;
+	let length = calc_needed_samples(self.attack + self.hold + 2.0*self.decay, samplerate, max_block_length);
 
 	let mut env = Vec::with_capacity(length);
 	env.resize(length, 0.0);
@@ -82,12 +84,12 @@ impl Generator {
 	sustain
     }
 
-    fn release_envelope(&self, samplerate: f32, nsamples: usize) -> Vec<f32> {
-	let mut env = Vec::with_capacity(nsamples);
-	env.resize(nsamples, 0.0);
+    fn release_envelope(&self, samplerate: f32, max_block_length: usize) -> Vec<f32> {
+	let length = calc_needed_samples(2.0*self.release, samplerate, max_block_length);
+	let mut env = Vec::new();
+	env.resize(length, 0.0);
 
 	let release_step = (-8.0/(samplerate*self.release)).exp();
-	let mut time = 0;
 	let mut last = self.sustain;
 
 	for e in env.iter_mut() {
@@ -99,7 +101,7 @@ impl Generator {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum State {
     AttackDecay(usize),
     Sustain,
@@ -168,12 +170,34 @@ impl ADSREnvelope {
 	}
     }
 
+    pub(crate) fn is_playing_or_releasing(&self) -> bool {
+	match self.state {
+	    State::Inactive => false,
+	    _ => true
+	}
+    }
+
+    pub(crate) fn is_playing(&self) -> bool {
+	match self.state {
+	    State::Release(_) | State::Inactive => false,
+	    _ => true
+	}
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn adsr_envelope_length() {
+	let eg = Generator::default();
+
+	assert_eq!(eg.ads_envelope(1.0, 8).as_slice(), [1.0; 16]);
+	assert_eq!(eg.sustain_envelope(1.0, 8).as_slice(), [1.0; 8]);
+	assert_eq!(eg.release_envelope(1.0, 8).as_slice(), [0.0; 16]);
+    }
 
     #[test]
     fn generate_adsr_envelope() {
@@ -187,7 +211,7 @@ mod tests {
 	let ads: Vec<f32> = eg.ads_envelope(1.0, 12)[..12].iter().map(|v| (v*100.0).round()/100.0).collect();
 	assert_eq!(ads.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
 
-	let rel: Vec<f32> = eg.release_envelope(1.0, 8).iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	let rel: Vec<f32> = eg.release_envelope(1.0, 8)[..8].iter().map(|v| (v*10000.0).round()/10000.0).collect();
 	assert_eq!(rel.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
     }
 }
