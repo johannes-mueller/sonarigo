@@ -202,11 +202,18 @@ fn take_opcode(region: &mut engine::RegionData, key: &str, value: &str) -> Resul
     match key {
 	"lokey" => region.key_range.set_lo(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
 	"hikey" => region.key_range.set_hi(parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?).map_err(|re| ParserError::RangeError(re)),
+	"pitch_keycenter" => region.set_pitch_keycenter(value.parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
+	"key" => {
+	    let key = parse_key(value).map_err(|ne| ParserError::NoteParseError(ne))?;
+	    match key {
+		k if k < 0 => Err(RangeError::out_of_range("key", 0, 127, key)),
+		k => region.key_range.set_hi(k).and_then(|_| region.key_range.set_lo(k)).and_then(|_| region.set_pitch_keycenter((k as u8).into()))
+	    }
+	}.map_err(|re| ParserError::RangeError(re)),
 	"lovel" => region.vel_range.set_lo(value.parse::<i32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"hivel" => region.vel_range.set_hi(value.parse::<i32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"lorand" => region.random_range.set_lo(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"hirand" => region.random_range.set_hi(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
-	"pitch_keycenter" => region.set_pitch_keycenter(value.parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"tune" => region.set_tune(value.parse::<i32>().map_err(|pe| ParserError::ParseIntError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"volume" => region.set_volume(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),
 	"rt_decay" => region.set_rt_decay(value.parse::<f32>().map_err(|pe| ParserError::ParseFloatError(pe))?).map_err(|re| ParserError::RangeError(re)),

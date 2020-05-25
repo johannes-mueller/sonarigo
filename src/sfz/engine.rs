@@ -471,6 +471,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_sfz_key_region_line() {
+	let regions = parse_sfz_text("<region> key=42".to_string()).unwrap();
+	assert_eq!(regions.len(), 1);
+	match &regions.get(0) {
+	    Some(rd) => {
+		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
+		assert_eq!(rd.key_range.lo, Some(wmidi::Note::FSharp1));
+	    }
+	    _ => panic!("Expected region, got somthing different.")
+	}
+    }
+
+    #[test]
     fn parse_sfz_hikey_lokey_notefmt_region_line() {
 	let regions = parse_sfz_text("<region> hikey=c#3 lokey=ab2 <region> hikey=c3 lokey=a2".to_string()).unwrap();
 	assert_eq!(regions.len(), 2);
