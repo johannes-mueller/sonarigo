@@ -6,7 +6,7 @@ use std::num::{ParseIntError, ParseFloatError};
 use std::str::Chars;
 
 use super::engine;
-use super::errors::*;
+use crate::errors::*;
 
 #[derive(Debug)]
 pub(super) enum ParserError {

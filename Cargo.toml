@@ -6,3 +6,4 @@ edition = "2018"
 
 [dependencies]
 wmidi = "3.1.0"
+log = "0.4.8"
