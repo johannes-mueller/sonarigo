@@ -292,7 +292,9 @@ pub(super) struct Region {
     max_block_length: usize,
 
     last_velocity: Option<u8>,
-    other_notes_on: HashSet<u8>
+    other_notes_on: HashSet<u8>,
+
+    sustain_pedal_pushed: bool
 }
 
 impl Region {
@@ -315,7 +317,9 @@ impl Region {
 	    real_sample_length: 0,
 
 	    last_velocity: None,
-	    other_notes_on: HashSet::new()
+	    other_notes_on: HashSet::new(),
+
+	    sustain_pedal_pushed: false
 	}
     }
 
@@ -368,6 +372,14 @@ impl Region {
 	}
     }
 
+    fn sustain_pedal(&mut self, pushed: bool) {
+	self.sustain_pedal_pushed = pushed;
+
+	if !pushed {
+	    self.note_off();
+	}
+    }
+
     fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
 	if !self.params.key_range.covering(note) {
 	    self.other_notes_on.insert(u8::from(note));
@@ -403,7 +415,20 @@ impl Region {
 	}
 	match self.params.trigger {
 	    Trigger::Release => self.last_velocity.map_or((), |v| self.note_on(v)),
-	    _ => self.note_off()
+	    _ => {
+		if !self.sustain_pedal_pushed {
+		    self.note_off();
+		}
+	    }
+	}
+    }
+
+    fn handle_control_event(&mut self, control_number: wmidi::ControlNumber, control_value: wmidi::ControlValue) {
+	let (cnum, cval) = (u8::from(control_number), u8::from(control_value));
+
+	match cnum {
+	    64 => self.sustain_pedal(cval >= 64),
+	    _ => {}
 	}
     }
 
@@ -411,6 +436,7 @@ impl Region {
 	match midi_msg {
 	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.handle_note_on(*note, *vel),
 	    wmidi::MidiMessage::NoteOff(_ch, note, _vel) => self.handle_note_off(*note),
+	    wmidi::MidiMessage::ControlChange(_ch, cnum, cval) => self.handle_control_event(*cnum, *cval),
 	    _ => {}
 	}
     }
@@ -1412,6 +1438,34 @@ mod tests {
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX));
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(!region.is_active());
+    }
+
+    #[test]
+    fn note_off_sustain_pedal() {
+	let mut rd = RegionData::default();
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(region.is_active());
+
+	// sustain pedal on
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	));
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
+	assert!(region.is_active());
+
+	// sustain pedal off
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	));
+
 	assert!(!region.is_active());
     }
 
