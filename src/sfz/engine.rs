@@ -217,9 +217,8 @@ impl ADSREnvelopeGenerator {
 		t if t < self.attack + self.hold
 		    => 1.0,
 		t if t < self.attack + self.hold + 2.0*self.decay => {
-		    let res = self.sustain + last;
 		    last *= decay_step;
-		    res
+		    self.sustain + last
 		}
 		_ => self.sustain
 	    };
@@ -237,8 +236,8 @@ impl ADSREnvelopeGenerator {
 	let mut last = self.sustain;
 
 	for e in env.iter_mut() {
-	    *e = last;
 	    last *= release_step;
+	    *e = last;
 	}
 
 	env
@@ -370,7 +369,8 @@ impl RegionData {
 #[derive(Clone)]
 struct RegionState {
     sample_position: Option<usize>,
-    ampeg_position: usize
+    ampeg_position: usize,
+    ampeg_release_position: Option<usize>
 }
 
 impl Default for RegionState {
@@ -378,6 +378,7 @@ impl Default for RegionState {
 	RegionState {
 	    sample_position: None,
 	    ampeg_position: 0,
+	    ampeg_release_position: None
 	}
     }
 }
@@ -390,6 +391,7 @@ pub(super) struct Region {
     state: RegionState,
 
     ampeg: Vec<f32>,
+    ampeg_release: Vec<f32>,
 
     samplerate: f32,
     real_sample_length: usize,
@@ -399,6 +401,7 @@ pub(super) struct Region {
 impl Region {
     fn new(params: RegionData, samplerate: f32, max_block_length: usize) -> Region {
 	let ampeg = params.ampeg.ads_envelope(samplerate, max_block_length);
+	let ampeg_release = params.ampeg.release_envelope(samplerate, max_block_length);
 
 	Region {
 	    params: params,
@@ -407,6 +410,7 @@ impl Region {
 	    state: Default::default(),
 
 	    ampeg: ampeg,
+	    ampeg_release: ampeg_release,
 
 	    samplerate: samplerate,
 	    max_block_length: max_block_length,
@@ -432,16 +436,26 @@ impl Region {
 
 	let gain = utils::dB_to_gain(self.params.volume);
 
+	let (envelope, mut env_position) = match self.state.ampeg_release_position {
+	    Some(p) => (&self.ampeg_release, p),
+	    None => (&self.ampeg, self.state.ampeg_position)
+	};
+
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
 	    let sl = self.sample_data[position];
 	    let sr = self.sample_data[position+1];
-	    let ampeg = self.ampeg[self.state.ampeg_position];
 
-	    *l += sl * gain * ampeg;
-	    *r += sr * gain * ampeg;
+	    *l += sl * gain * envelope[env_position];
+	    *r += sr * gain * envelope[env_position];
 
 	    position += 2;
-	    self.state.ampeg_position += 1;
+	    env_position += 1;
+	}
+
+	if self.state.ampeg_release_position.is_some() {
+	    self.state.ampeg_release_position = Some(env_position);
+	} else {
+	    self.state.ampeg_position = env_position;
 	}
 
 	self.state.sample_position = if position < self.real_sample_length * 2 {
@@ -455,16 +469,24 @@ impl Region {
 	self.state.sample_position.is_some()
     }
 
-    fn activate(&mut self) {
+    fn note_on(&mut self) {
 	if !self.is_active() {
 	    self.state.sample_position = Some(0);
 	    self.state.ampeg_position = 0;
+	    self.state.ampeg_release_position = None;
+	}
+    }
+
+    fn note_off(&mut self) {
+	if self.is_active() {
+	    self.state.ampeg_release_position = Some(0);
 	}
     }
 
     fn pass_midi_msg(&mut self, midi_msg: &wmidi::MidiMessage) {
 	match midi_msg {
-	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.activate(),
+	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.note_on(),
+	    wmidi::MidiMessage::NoteOff(_ch, note, vel) => self.note_off(),
 	    _ => {}
 	}
     }
@@ -1205,19 +1227,10 @@ mod tests {
 	let region = regions.get(0).unwrap();
 
 	let ads: Vec<f32> = region.ampeg.ads_envelope(1.0, 12)[..12].iter().map(|v| (v*100.0).round()/100.0).collect();
-	assert_eq!(ads.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6]);
+	assert_eq!(ads.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
 
 	let rel: Vec<f32> = region.ampeg.release_envelope(1.0, 8).iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(rel.as_slice(), [0.6,
-				    0.1211,
-				    0.0245,
-				    0.0049,
-				    0.0010,
-				    0.0002,
-				    0.0,
-				    0.0
-	]);
-
+	assert_eq!(rel.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1242,7 +1255,7 @@ mod tests {
 	let mut region = Region::new(RegionData::default(), 1.0, 8);
 	region.set_sample_data(sample);
 
-	region.activate();
+	region.note_on();
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1279,7 +1292,7 @@ mod tests {
 	let mut region = Region::new(region_data, 1.0, 8);
 	region.set_sample_data(sample.clone());
 
-	region.activate();
+	region.note_on();
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1298,7 +1311,7 @@ mod tests {
 
 	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 16);
 	region.set_sample_data(sample.clone());
-	region.activate();
+	region.note_on();
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -1306,8 +1319,7 @@ mod tests {
 	region.process(&mut out_left, &mut out_right);
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
-	assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6]);
-
+	assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
     }
 
     #[test]
@@ -1322,9 +1334,9 @@ mod tests {
 	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
 
 	engine.regions[0].set_sample_data(sample1);
-	engine.regions[0].activate();
+	engine.regions[0].note_on();
 	engine.regions[1].set_sample_data(sample2);
-	engine.regions[1].activate();
+	engine.regions[1].note_on();
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 	let mut out_right: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -1345,7 +1357,6 @@ mod tests {
 
 
 
-    /*
     #[test]
     fn simple_note_on_off() {
 	let sample = vec![0.1, -0.1,
@@ -1353,12 +1364,10 @@ mod tests {
 			  0.3, -0.3,
 			  0.4, -0.4,
 			  0.5, -0.5];
-	let mut engine = Engine { regions: Vec::new() };
 
-	let mut region = Region::new(RegionData::default());
-	region.set_sample_data(sample.clone());
+	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
 
-	engine.regions.push(region);
+	engine.regions[0].set_sample_data(sample.clone());
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -1368,17 +1377,66 @@ mod tests {
 	assert_eq!(out_left[0], 0.0);
 	assert_eq!(out_right[0], -0.0);
 
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
 	engine.process(&mut out_left, &mut out_right);
-
 	assert_eq!(out_left[0], 0.1);
 	assert_eq!(out_right[0], -0.1);
 
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left[0], 0.0);
+	assert_eq!(out_right[0], 0.0);
     }
 
 
+    #[test]
+    fn note_on_off_adsr() {
+	let mut sample = vec![];
+	sample.resize(48, 1.0);
+	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
+	let mut engine = Engine::new(regions, 1.0, 16);
+
+	engine.regions[0].set_sample_data(sample.clone());
+
+	let mut out_left: [f32; 12] = [0.0; 12];
+	let mut out_right: [f32; 12] = [0.0; 12];
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	engine.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
+	assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
+
+	let mut out_left: [f32; 4] = [0.0; 4];
+	let mut out_right: [f32; 4] = [0.0; 4];
+
+	engine.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(out.as_slice(), [0.6, 0.6, 0.6, 0.6]);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	let mut out_left: [f32; 8] = [0.0; 8];
+	let mut out_right: [f32; 8] = [0.0; 8];
+
+	engine.process(&mut out_left, &mut out_right);
+
+	let rel: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(rel.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
+    }
+
+    /*
 
 
 //    #[test]
