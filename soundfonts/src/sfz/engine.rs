@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::convert::TryFrom;
 
 use itertools::izip;
 
@@ -10,38 +11,41 @@ use crate::utils;
 
 #[derive(Clone, Copy)]
 pub(super) struct VelRange {
-    lo: i8,
-    hi: i8
+    lo: wmidi::Velocity,
+    hi: wmidi::Velocity
 }
 
 impl VelRange {
     pub(super) fn set_hi(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    v if v < 0 && v > 127 => Err(RangeError::out_of_range("hivel", 0, 127, v)),
-	    v if (v as i8) < self.lo => Err(RangeError::flipped_range("hivel", v, self.lo as i32)),
-	    _ => {
-		self.hi = v as i8;
-		Ok(())
-	    }
+	let vel = wmidi::Velocity::try_from(v as u8).map_err(|_| RangeError::out_of_range("hivel", 0, 127, v))?;
+	if  vel < self.lo {
+	    return Err(RangeError::flipped_range("hivel", v, u8::from(self.lo) as i32));
 	}
+	self.hi = vel;
+	Ok(())
     }
 
     pub(super) fn set_lo(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    v if v < 0 && v > 127 => Err(RangeError::out_of_range("lovel", 0, 127, v)),
-	    v if (v as i8) > self.hi => Err(RangeError::flipped_range("lovel", v, self.lo as i32)),
-	    _ => {
-		self.lo = v as i8;
-		Ok(())
-	    }
+	let vel = wmidi::Velocity::try_from(v as u8).map_err(|_| RangeError::out_of_range("lovel", 0, 127, v))?;
+	if  vel > self.hi {
+	    return Err(RangeError::flipped_range("lovel", v, u8::from(self.hi) as i32));
 	}
+	self.lo = vel;
+	Ok(())
+    }
+
+    pub(super) fn covering(&self, vel: wmidi::Velocity) -> bool {
+	vel >= self.lo && vel <= self.hi
     }
 }
 
 
 impl Default for VelRange {
     fn default() -> Self {
-	VelRange { hi: 127, lo: 0 }
+	VelRange {
+	    hi: wmidi::Velocity::MAX,
+	    lo: wmidi::Velocity::MIN
+	}
     }
 }
 
@@ -283,7 +287,7 @@ pub(super) struct Region {
 
     amp_envelope: envelopes::ADSREnvelope,
 
-    velocity_amp: f32,
+    gain: f32,
 
     samplerate: f32,
     real_sample_length: usize,
@@ -308,7 +312,7 @@ impl Region {
 	    // FIXME: should be initialized
 	    sample: sample::Sample::new(Vec::new(), samplerate, max_block_length, 440.0),
 
-	    velocity_amp: 1.0,
+	    gain: 1.0,
 
 	    amp_envelope: amp_envelope,
 
@@ -335,15 +339,13 @@ impl Region {
 	    return;
 	}
 
-	let gain = utils::dB_to_gain(self.params.volume) * self.velocity_amp;
-
 	let (envelope, mut env_position) = self.amp_envelope.active_envelope();
 
 	let sample_iterator = self.sample.iter(self.current_note_frequency);
 
 	for (l, r, (sl, sr)) in izip!(out_left.iter_mut(), out_right.iter_mut(), sample_iterator) {
-	    *l += sl * gain * envelope[env_position];
-	    *r += sr * gain * envelope[env_position];
+	    *l += sl * self.gain * envelope[env_position];
+	    *r += sr * self.gain * envelope[env_position];
 
 	    env_position += 1;
 	}
@@ -362,7 +364,20 @@ impl Region {
 	}
 
 	let velocity = u8::from(velocity);
-	self.velocity_amp = velocity as f32 / 127.0;
+	let vel = if self.params.amp_veltrack < 0.0 {
+	    127 - velocity
+	} else {
+	    velocity
+	};
+
+	let velocity_db = if vel == 0 {
+	    -160.0
+	} else {
+	    let vel = vel as f32;
+	    -20.0 * ((127.0 * 127.0)/(vel * vel)).log10()
+	};
+	self.gain = utils::dB_to_gain(self.params.volume + velocity_db * self.params.amp_veltrack.abs());
+
 	self.current_note_frequency = note.to_freq_f32();
 
 	self.sample.note_on();
@@ -390,6 +405,10 @@ impl Region {
     fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
 	if !self.params.key_range.covering(note) {
 	    self.other_notes_on.insert(u8::from(note));
+	    return;
+	}
+
+	if !self.params.vel_range.covering(velocity) {
 	    return;
 	}
 
@@ -503,8 +522,8 @@ mod tests {
 
 	assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 	assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
-	assert_eq!(rd.vel_range.hi, 127);
-	assert_eq!(rd.vel_range.lo, 0);
+	assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+	assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 
 	assert_eq!(rd.amp_veltrack, 1.0);
 /* FIXME: How to test this?
@@ -531,8 +550,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -559,8 +578,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::GSharp1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -568,8 +587,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::C2));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::A1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -722,8 +741,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::HIGHEST_NOTE));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 23);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 23);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -737,8 +756,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 23);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 23);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -752,8 +771,8 @@ mod tests {
 	    Some(rd) => {
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::C0));
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 23);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 23);
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -778,15 +797,15 @@ mod tests {
 	assert_eq!(regions.len(), 2);
 	match &regions.get(0) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 23)
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 23)
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
 	match &regions.get(1) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 21)
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 21)
 	    }
 	    _ => panic!("Expected region, got somthing different.")
 	}
@@ -808,8 +827,8 @@ mod tests {
 	assert_eq!(regions.len(), 6);
 	match &regions.get(0) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::F1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
 	    }
@@ -817,8 +836,8 @@ mod tests {
 	}
 	match &regions.get(1) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 21);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(u8::from(rd.vel_range.lo), 21);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::F1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
 	    }
@@ -826,8 +845,8 @@ mod tests {
 	}
 	match &regions.get(2) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 41);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(u8::from(rd.vel_range.hi), 41);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
 	    }
@@ -835,8 +854,8 @@ mod tests {
 	}
 	match &regions.get(3) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 41);
-		assert_eq!(rd.vel_range.lo, 21);
+		assert_eq!(u8::from(rd.vel_range.hi), 41);
+		assert_eq!(u8::from(rd.vel_range.lo), 21);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
 	    }
@@ -844,8 +863,8 @@ mod tests {
 	}
 	match &regions.get(4) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 42);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(u8::from(rd.vel_range.hi), 42);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
 	    }
@@ -853,8 +872,8 @@ mod tests {
 	}
 	match &regions.get(5) {
 	    Some(rd) => {
-		assert_eq!(rd.vel_range.hi, 41);
-		assert_eq!(rd.vel_range.lo, 23);
+		assert_eq!(u8::from(rd.vel_range.hi), 41);
+		assert_eq!(u8::from(rd.vel_range.lo), 23);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::FSharp1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::LOWEST_NOTE));
 	    }
@@ -923,8 +942,8 @@ mod tests {
 		assert_eq!(rd.tune, 10);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
-		assert_eq!(rd.vel_range.hi, 26);
-		assert_eq!(rd.vel_range.lo, 1);
+		assert_eq!(u8::from(rd.vel_range.hi), 26);
+		assert_eq!(u8::from(rd.vel_range.lo), 1);
 		assert_eq!(rd.sample, "48khz24bit\\A0v1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -947,8 +966,8 @@ mod tests {
 		assert_eq!(rd.tune, 10);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
-		assert_eq!(rd.vel_range.hi, 34);
-		assert_eq!(rd.vel_range.lo, 27);
+		assert_eq!(u8::from(rd.vel_range.hi), 34);
+		assert_eq!(u8::from(rd.vel_range.lo), 27);
 		assert_eq!(rd.sample, "48khz24bit\\A0v2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -971,8 +990,8 @@ mod tests {
 		assert_eq!(rd.tune, -13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::F5));
-		assert_eq!(rd.vel_range.hi, 26);
-		assert_eq!(rd.vel_range.lo, 1);
+		assert_eq!(u8::from(rd.vel_range.hi), 26);
+		assert_eq!(u8::from(rd.vel_range.lo), 1);
 		assert_eq!(rd.sample, "48khz24bit\\F#6v1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -995,8 +1014,8 @@ mod tests {
 		assert_eq!(rd.tune, -13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::F5));
-		assert_eq!(rd.vel_range.hi, 34);
-		assert_eq!(rd.vel_range.lo, 27);
+		assert_eq!(u8::from(rd.vel_range.hi), 34);
+		assert_eq!(u8::from(rd.vel_range.lo), 27);
 		assert_eq!(rd.sample, "48khz24bit\\F#6v2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -1019,8 +1038,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AbMinus1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 45);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(u8::from(rd.vel_range.lo), 45);
 		assert_eq!(rd.sample, "48khz24bit\\harmLA0.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 6.0);
@@ -1043,8 +1062,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db0));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 45);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(u8::from(rd.vel_range.lo), 45);
 		assert_eq!(rd.sample, "48khz24bit\\harmLC1.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 6.0);
@@ -1067,8 +1086,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::AMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\rel1.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 2.0);
@@ -1091,8 +1110,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::ASharpMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::ASharpMinus1));
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\rel2.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 2.0);
@@ -1115,8 +1134,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\pedalD1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -1139,8 +1158,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\pedalD2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -1163,8 +1182,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\pedalU1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -1187,8 +1206,8 @@ mod tests {
 		assert_eq!(rd.tune, 0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
-		assert_eq!(rd.vel_range.hi, 127);
-		assert_eq!(rd.vel_range.lo, 0);
+		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
+		assert_eq!(rd.vel_range.lo, wmidi::Velocity::MIN);
 		assert_eq!(rd.sample, "48khz24bit\\pedalU2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
@@ -1383,6 +1402,51 @@ mod tests {
 	assert_eq!(out_right[2], 1.0);
     }
 
+    #[test]
+    fn note_trigger_key_range() {
+	let mut rd = RegionData::default();
+	rd.key_range.set_hi(70);
+	rd.key_range.set_lo(60);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MAX));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MIN));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E3, wmidi::Velocity::try_from(63).unwrap()));
+	assert!(region.is_active());
+	assert_eq!(region.gain, 0.24607849215698431397);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::E3, wmidi::Velocity::MIN));
+	assert!(!region.is_active());
+    }
+
+
+    #[test]
+    fn note_trigger_vel_range() {
+	let mut rd = RegionData::default();
+	rd.vel_range.set_hi(70);
+	rd.vel_range.set_lo(60);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(!region.is_active());
+
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()));
+	assert!(region.is_active());
+	assert_eq!(region.gain, 0.24607849215698431397);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(!region.is_active());
+    }
+
+
 
     #[test]
     fn note_trigger_release() {
@@ -1390,12 +1454,12 @@ mod tests {
 	rd.set_trigger(Trigger::Release);
 	let mut region = Region::new(rd, 1.0, 2);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()));
 	assert!(!region.is_active());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(region.is_active());
-	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+	assert_eq!(region.gain, 0.24607849215698431397);
     }
 
     #[test]
@@ -1438,7 +1502,7 @@ mod tests {
 	));
 
 	assert!(region.is_active());
-	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+	assert_eq!(region.gain, 0.24607849215698431397);
 
 
 	let mut rd = RegionData::default();
@@ -1463,7 +1527,7 @@ mod tests {
 	));
 
 	assert!(region.is_active());
-	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+	assert_eq!(region.gain, 0.24607849215698431397);
     }
 
     #[test]
@@ -1477,8 +1541,32 @@ mod tests {
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(region.is_active());
-	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+	assert_eq!(region.gain, 0.24607849215698431397);
     }
+
+    #[test]
+    fn note_trigger_release_key_vel_range() {
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::ReleaseKey);
+	rd.vel_range.set_hi(70);
+	rd.vel_range.set_lo(60);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(!region.is_active());
+
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(region.is_active());
+	assert_eq!(region.gain, 0.24607849215698431397);
+    }
+
 
     #[test]
     fn note_trigger_release_key_sustain_pedal() {
@@ -1726,20 +1814,78 @@ mod tests {
     fn note_on_velocity() {
 	let sample = vec![1.0, 1.0];
 
-	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
+	let mut region = Region::new(RegionData::default(), 1.0, 16);
 
-	engine.regions[0].set_sample_data(sample.clone());
+	region.set_sample_data(sample.clone());
 
-	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1,
-						      wmidi::Note::C3,
-						      unsafe { wmidi::Velocity::from_unchecked(63) }));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()));
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
 
-	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.49606299212598425197);
-	assert_eq!(out_right[0], 0.49606299212598425197);
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], 0.24607849215698431397);
+	assert_eq!(out_right[0], 0.24607849215698431397);
+    }
+
+    #[test]
+    fn note_on_gain_veltrack() {
+	let sample = vec![1.0, 1.0];
+	let mut rd = RegionData::default();
+	rd.set_amp_veltrack(0.0);
+
+	let mut region = Region::new(rd, 1.0, 16);
+
+	region.set_sample_data(sample.clone());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], 1.0);
+	assert_eq!(out_right[0], 1.0);
+
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], 1.0);
+	assert_eq!(out_right[0], 1.0);
+
+
+	let mut rd = RegionData::default();
+	rd.set_amp_veltrack(-100.0);
+
+	let mut region = Region::new(rd, 1.0, 16);
+
+	region.set_sample_data(sample.clone());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], 1.0);
+	assert_eq!(out_right[0], 1.0);
+
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	let mut out_left: [f32; 1] = [0.0];
+	let mut out_right: [f32; 1] = [0.0];
+
+	region.process(&mut out_left, &mut out_right);
+	assert_eq!(out_left[0], utils::dB_to_gain(-160.0));
+	assert_eq!(out_right[0], utils::dB_to_gain(-160.0));
+
     }
 
     #[test]
@@ -1785,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn note_on_off_multiple_regions() {
+    fn note_on_off_multiple_regions_key() {
 	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
 	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
 	let sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
@@ -1872,6 +2018,86 @@ mod tests {
 	    assert_f32_eq(out_right[0], 6e-6);
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 0.0);
+	    assert_f32_eq(out_right[0], 0.0);
+	}
+    }
+
+    #[test]
+    fn note_on_off_multiple_regions_vel() {
+	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
+	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
+	let sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
+	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
+
+	let region_text = "
+<region> lovel=30 hivel=30 amp_veltrack=0
+<region> lovel=50 hivel=50 amp_veltrack=0
+<region> lovel=40 hivel=50 amp_veltrack=0
+<region> lovel=50 hivel=60 amp_veltrack=0
+".to_string();
+	let regions = parse_sfz_text(region_text).unwrap();
+
+	let mut engine = Engine::new(regions, 1.0, 1);
+
+	engine.regions[0].set_sample_data(sample1.clone());
+	engine.regions[1].set_sample_data(sample2.clone());
+	engine.regions[2].set_sample_data(sample3.clone());
+	engine.regions[3].set_sample_data(sample4.clone());
+
+	for _ in 0..2 {
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(20).unwrap()));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 0.0);
+	    assert_f32_eq(out_right[0], 0.0);
+
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(30).unwrap()));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 1e1);
+	    assert_f32_eq(out_right[0], 1e2);
+
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(55).unwrap()));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], -7e3);
+	    assert_f32_eq(out_right[0], -7e4);
+
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(50).unwrap()));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], -1e5);
+	    assert_f32_eq(out_right[0], -1e6);
+
+	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(45).unwrap()));
+
+	    let mut out_left: [f32; 1] = [0.0];
+	    let mut out_right: [f32; 1] = [0.0];
+
+	    engine.process(&mut out_left, &mut out_right);
+	    assert_f32_eq(out_left[0], 4e5);
+	    assert_f32_eq(out_right[0], 4e6);
+
+	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
 
 	    let mut out_left: [f32; 1] = [0.0];
 	    let mut out_right: [f32; 1] = [0.0];
