@@ -472,6 +472,10 @@ impl engine::EngineTrait for Engine {
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
+	    *l = 0.0;
+	    *r = 0.0;
+	}
 	for r in &mut self.regions {
 	    r.process(out_left, out_right);
 	}
@@ -1329,7 +1333,21 @@ mod tests {
 	region.process(&mut out_left, &mut out_right);
 	let out: Vec<f32> = out_left.iter().map(|v| (v*1000.0).round()/1000.0).collect();
 	assert_eq!(out, [0.6; 12]);
-}
+    }
+
+
+    #[test]
+    fn engine_process_silence() {
+	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
+
+	let mut out_left: [f32; 4] = [1.0; 4];
+	let mut out_right: [f32; 4] = [1.0; 4];
+
+	engine.process(&mut out_left, &mut out_right);
+
+	assert_eq!(out_left, [0.0; 4]);
+	assert_eq!(out_right, [0.0; 4]);
+    }
 
 
     #[test]
