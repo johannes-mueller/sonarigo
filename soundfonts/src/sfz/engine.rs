@@ -1,5 +1,3 @@
-use std::fmt;
-use std::slice;
 use std::collections::HashSet;
 
 use itertools::izip;
@@ -291,7 +289,9 @@ pub(super) struct Region {
     real_sample_length: usize,
     max_block_length: usize,
 
-    last_velocity: Option<u8>,
+    current_note_frequency: f32,
+
+    last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     other_notes_on: HashSet<u8>,
 
     sustain_pedal_pushed: bool
@@ -306,7 +306,7 @@ impl Region {
 	    params: params,
 
 	    // FIXME: should be initialized
-	    sample: sample::Sample::new(Vec::new(), samplerate, max_block_length),
+	    sample: sample::Sample::new(Vec::new(), samplerate, max_block_length, 440.0),
 
 	    velocity_amp: 1.0,
 
@@ -316,7 +316,9 @@ impl Region {
 	    max_block_length: max_block_length,
 	    real_sample_length: 0,
 
-	    last_velocity: None,
+	    current_note_frequency: 0.0,
+
+	    last_note_on: None,
 	    other_notes_on: HashSet::new(),
 
 	    sustain_pedal_pushed: false
@@ -324,8 +326,8 @@ impl Region {
     }
 
     // # should be done in ::new()
-    fn set_sample_data(&mut self,  mut sample_data: Vec<f32>) {
-	self.sample = sample::Sample::new(sample_data, self.samplerate, self.max_block_length);
+    fn set_sample_data(&mut self, sample_data: Vec<f32>) {
+	self.sample = sample::Sample::new(sample_data, self.samplerate, self.max_block_length, self.params.pitch_keycenter.to_freq_f32());
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
@@ -337,7 +339,7 @@ impl Region {
 
 	let (envelope, mut env_position) = self.amp_envelope.active_envelope();
 
-	let sample_iterator = self.sample.iter();
+	let sample_iterator = self.sample.iter(self.current_note_frequency);
 
 	for (l, r, (sl, sr)) in izip!(out_left.iter_mut(), out_right.iter_mut(), sample_iterator) {
 	    *l += sl * gain * envelope[env_position];
@@ -354,12 +356,14 @@ impl Region {
 	self.sample.is_playing() && self.amp_envelope.is_playing()
     }
 
-    fn note_on(&mut self, velocity: u8) {
+    fn note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
 	if self.is_active() {
 	    return;
 	}
 
+	let velocity = u8::from(velocity);
 	self.velocity_amp = velocity as f32 / 127.0;
+	self.current_note_frequency = note.to_freq_f32();
 
 	self.sample.note_on();
 	self.amp_envelope.note_on();
@@ -377,7 +381,7 @@ impl Region {
 
 	if !pushed {
 	    match self.params.trigger {
-		Trigger::Release => self.last_velocity.map_or((), |v| self.note_on(v)),
+		Trigger::Release => self.last_note_on.map_or((), |(note, velocity)| self.note_on(note, velocity)),
 		_ => self.note_off()
 	    }
 	}
@@ -389,12 +393,10 @@ impl Region {
 	    return;
 	}
 
-	let velocity = u8::from(velocity);
-
-	match self.params.trigger {
+ 	match self.params.trigger {
 	    Trigger::Release |
 	    Trigger::ReleaseKey => {
-		self.last_velocity = Some(velocity);
+		self.last_note_on = Some((note, velocity));
 		return
 	    }
 	    Trigger::First => {
@@ -409,7 +411,7 @@ impl Region {
 	    }
 	    _ => {}
 	}
-	self.note_on(velocity);
+	self.note_on(note, velocity);
     }
 
     fn handle_note_off(&mut self, note: wmidi::Note) {
@@ -419,7 +421,7 @@ impl Region {
 	}
 	match self.params.trigger {
 	    Trigger::Release |
-	    Trigger::ReleaseKey => self.last_velocity.map_or((), |v| self.note_on(v)),
+	    Trigger::ReleaseKey => self.last_note_on.map_or((), |(note, velocity)| self.note_on(note,velocity)),
 	    _ => {
 		if !self.sustain_pedal_pushed {
 		    self.note_off();
@@ -488,8 +490,6 @@ mod tests {
     use super::*;
     use super::super::parser::parse_sfz_text;
     use crate::engine::EngineTrait;
-
-    use std::f32::consts::PI;
 
     fn assert_f32_eq(a: f32, b: f32) {
 	if (a - b).abs() > f32::EPSILON {
@@ -1228,7 +1228,7 @@ mod tests {
 	let mut region = Region::new(RegionData::default(), 1.0, 8);
 	region.set_sample_data(sample);
 
-	region.note_on(127);
+	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1265,7 +1265,7 @@ mod tests {
 	let mut region = Region::new(region_data, 1.0, 8);
 	region.set_sample_data(sample.clone());
 
-	region.note_on(127);
+	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -1284,7 +1284,7 @@ mod tests {
 
 	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 16);
 	region.set_sample_data(sample.clone());
-	region.note_on(127);
+	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -1297,13 +1297,13 @@ mod tests {
 
   #[test]
     fn region_amp_envelope_process_sustain() {
-	let mut sample = vec![1.0; 96];
+	let sample = vec![1.0; 96];
 
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
 	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 12);
 	region.set_sample_data(sample.clone());
-	region.note_on(127);
+	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -1362,9 +1362,9 @@ mod tests {
 	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
 
 	engine.regions[0].set_sample_data(sample1);
-	engine.regions[0].note_on(127);
+	engine.regions[0].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 	engine.regions[1].set_sample_data(sample2);
-	engine.regions[1].note_on(127);
+	engine.regions[1].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 	let mut out_right: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn note_off_sustain_pedal() {
-	let mut rd = RegionData::default();
+	let rd = RegionData::default();
 	let mut region = Region::new(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX));
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn note_on_velocity() {
-	let mut sample = vec![1.0, 1.0];
+	let sample = vec![1.0, 1.0];
 
 	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
 
@@ -1744,7 +1744,7 @@ mod tests {
 
     #[test]
     fn note_on_off_key_range() {
-	let mut sample = vec![1.0, 1.0,
+	let sample = vec![1.0, 1.0,
 			      0.5, 0.5];
 
 	let regions = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap();
@@ -1786,16 +1786,16 @@ mod tests {
 
     #[test]
     fn note_on_off_multiple_regions() {
-	let mut sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
-	let mut sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
-	let mut sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
-	let mut sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
+	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
+	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
+	let sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
+	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
 
 	let region_text = "
-<region> lokey=a3 hikey=a3
-<region> lokey=60 hikey=60
-<region> lokey=58 hikey=60
-<region> lokey=60 hikey=62
+<region> lokey=a3 hikey=a3 pitch_keycenter=57
+<region> lokey=60 hikey=60 pitch_keycenter=60
+<region> lokey=58 hikey=60 pitch_keycenter=60
+<region> lokey=60 hikey=62 pitch_keycenter=61
 ".to_string();
 	let regions = parse_sfz_text(region_text).unwrap();
 
@@ -1882,6 +1882,7 @@ mod tests {
 	}
     }
 
+
     /*
 
 
@@ -1938,24 +1939,6 @@ mod tests {
 
     }
 
-    fn make_test_sample(nsamples: u32, samplerate: f32, freq: f32) -> Vec<f32> {
-	let omega = freq/samplerate * 2.0*PI;
-	(0..nsamples).map(|t| ((omega * t as f32).sin())).collect()
-    }
-
-    fn test_calc_frequency(samplerate: f32, sample: Vec<f32>, test_freq: f32) -> bool {
-	let (zeros, _) = sample.iter().fold((0, 0.0), |(n, last), s| {
-	    if last * s < 0.0 {
-		(n + 1, *s)
-	    } else {
-		(n, *s)
-	    }
-	});
-
-	let zeros = zeros as f32;
-	let to_freq = samplerate/(sample.len() as f32);
-	zeros * to_freq < test_freq && (zeros + 1.0) * to_freq > test_freq
-    }
 
 */
 }
