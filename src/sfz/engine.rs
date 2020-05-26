@@ -392,7 +392,8 @@ impl Region {
 	let velocity = u8::from(velocity);
 
 	match self.params.trigger {
-	    Trigger::Release => {
+	    Trigger::Release |
+	    Trigger::ReleaseKey => {
 		self.last_velocity = Some(velocity);
 		return
 	    }
@@ -417,7 +418,8 @@ impl Region {
 	    return;
 	}
 	match self.params.trigger {
-	    Trigger::Release => self.last_velocity.map_or((), |v| self.note_on(v)),
+	    Trigger::Release |
+	    Trigger::ReleaseKey => self.last_velocity.map_or((), |v| self.note_on(v)),
 	    _ => {
 		if !self.sustain_pedal_pushed {
 		    self.note_off();
@@ -1444,7 +1446,87 @@ mod tests {
 
 	assert!(region.is_active());
 	assert_eq!(region.velocity_amp, 0.49606299212598425197);
-}
+    }
+
+    #[test]
+    fn note_trigger_release_key() {
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::ReleaseKey);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert!(region.is_active());
+	assert_eq!(region.velocity_amp, 0.49606299212598425197);
+    }
+
+    #[test]
+    fn note_trigger_release_key_sustain_pedal() {
+    	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::ReleaseKey);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	// sustain pedal on
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	));
+
+	// sustain pedal off
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	));
+
+	assert!(!region.is_active());
+
+	// sustain pedal on
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	));
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }));
+	assert!(!region.is_active());
+
+	// sustain pedal off
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	));
+
+	assert!(!region.is_active());
+
+
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::ReleaseKey);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }));
+	assert!(!region.is_active());
+
+    	// sustain pedal on
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	));
+
+	// sustain pedal off
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
+	    wmidi::Channel::Ch1,
+	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
+	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	));
+
+	assert!(!region.is_active());
+    }
 
     #[test]
     fn note_trigger_first() {
