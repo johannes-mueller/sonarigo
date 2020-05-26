@@ -1,0 +1,7 @@
+[package]
+name = "sonariga-jack"
+version = "0.0.1"
+authors = ["Johannes Mueller <github@johannes-mueller.org>"]
+edition = "2018"
+
+[dependencies]
