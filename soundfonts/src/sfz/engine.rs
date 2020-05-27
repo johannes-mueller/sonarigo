@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::convert::TryFrom;
 
 use itertools::izip;
@@ -141,6 +141,52 @@ impl RandomRange {
     }
 }
 
+#[derive(Default, Clone)]
+pub(super) struct ControlValRange {
+    hi: Option<wmidi::ControlValue>,
+    lo: Option<wmidi::ControlValue>
+}
+
+impl ControlValRange {
+    pub(super) fn set_hi(&mut self, v: i32) -> Result<(), RangeError> {
+	if v < 0 {
+	    self.hi = None;
+	    return Ok(());
+	}
+	let val = wmidi::ControlValue::try_from(v as u8).map_err(|_| RangeError::out_of_range("on_hiccXX", 0, 127, v))?;
+	match self.lo {
+	    Some(lo) if val < lo => {
+		return Err(RangeError::flipped_range("on_hiccXX", v, u8::from(lo) as i32));
+	    }
+	    _ => {}
+	};
+	self.hi = Some(val);
+	Ok(())
+    }
+
+    pub(super) fn set_lo(&mut self, v: i32) -> Result<(), RangeError> {
+	if v < 0 {
+	    self.lo = None;
+	    return Ok(());
+	}
+	let val = wmidi::ControlValue::try_from(v as u8).map_err(|_| RangeError::out_of_range("on_loccXX", 0, 127, v))?;
+	match self.hi {
+	    Some(hi) if val > hi => {
+		return Err(RangeError::flipped_range("on_loccXX", v, u8::from(hi) as i32));
+	    }
+	    _ => {}
+	};
+	self.lo = Some(val);
+	Ok(())
+    }
+
+    pub(super) fn covering(&self, vel: wmidi::ControlValue) -> bool {
+	match (self.lo, self.hi) {
+	    (Some(lo), Some(hi)) => vel >= lo && vel <= hi,
+	     _ => false
+	}
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Trigger {
@@ -184,8 +230,7 @@ pub struct RegionData {
     group: u32,
     off_by: u32,
 
-    on_lo_cc: (u32, i32),
-    on_hi_cc: (u32, i32),
+    on_ccs: HashMap<u8, ControlValRange>,
 
     pub(super) random_range: RandomRange,
 }
@@ -214,8 +259,7 @@ impl Default for RegionData {
 	    group:  Default::default(),
 	    off_by:  Default::default(),
 
-	    on_lo_cc: (0, 0),
-	    on_hi_cc: (0, 0),
+	    on_ccs: HashMap::new(),
 
 	    random_range: Default::default(),
 	}
@@ -270,13 +314,32 @@ impl RegionData {
 	self.off_by = v;
     }
 
-    pub(super) fn set_on_lo_cc(&mut self, channel: u32, v: i32) {
-	self.on_lo_cc = (channel, v);
+    pub(super) fn push_on_lo_cc(&mut self, channel: u32, v: i32) -> Result<(), RangeError> {
+	let channel = channel as u8;
+	match self.on_ccs.get_mut(&channel) {
+	    Some(ref mut range) => range.set_lo(v),
+	    None => {
+		let mut range = ControlValRange { hi: None, lo: None };
+		range.set_lo(v)?;
+		self.on_ccs.insert(channel, range);
+		Ok(())
+	    }
+	}
     }
 
-    pub(super) fn set_on_hi_cc(&mut self, channel: u32, v: i32) {
-	self.on_hi_cc = (channel, v);
+    pub(super) fn push_on_hi_cc(&mut self, channel: u32, v: i32) -> Result<(), RangeError> {
+	let channel = channel as u8;
+	match self.on_ccs.get_mut(&channel) {
+	    Some(ref mut range) => range.set_hi(v),
+	    None => {
+		let mut range = ControlValRange { hi: None, lo: None };
+		range.set_hi(v)?;
+		self.on_ccs.insert(channel, range);
+		Ok(())
+	    }
+	}
     }
+
 }
 
 
@@ -455,6 +518,13 @@ impl Region {
 	match cnum {
 	    64 => self.sustain_pedal(cval >= 64),
 	    _ => {}
+	}
+
+	match self.params.on_ccs.get(&cnum) {
+	    Some(cvrange) => if cvrange.covering(control_value) {
+		self.note_on(self.params.pitch_keycenter, wmidi::Velocity::MAX)
+	    }
+	    None => {}
 	}
     }
 
@@ -950,8 +1020,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, 0.0);
@@ -974,8 +1043,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, 0.0);
@@ -998,8 +1066,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, 0.0);
@@ -1022,8 +1089,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, 0.0);
@@ -1046,8 +1112,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -4.0);
@@ -1070,8 +1135,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -4.0);
@@ -1094,8 +1158,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 0.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -37.0);
@@ -1118,8 +1181,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 0.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (0, 0));
-		assert_eq!(rd.on_hi_cc, (0, 0));
+		assert!(rd.on_ccs.is_empty(), (0, 0));
 		assert_eq!(rd.random_range.hi, 0.0);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -37.0);
@@ -1142,8 +1204,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 1);
 		assert_eq!(rd.off_by, 2);
-		assert_eq!(rd.on_lo_cc, (64, 126));
-		assert_eq!(rd.on_hi_cc, (64, 127));
+		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(126).unwrap()));
 		assert_eq!(rd.random_range.hi, 0.5);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -20.0);
@@ -1166,8 +1227,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 1);
 		assert_eq!(rd.off_by, 2);
-		assert_eq!(rd.on_lo_cc, (64, 126));
-		assert_eq!(rd.on_hi_cc, (64, 127));
+		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(127).unwrap()));
 		assert_eq!(rd.random_range.hi, 1.0);
 		assert_eq!(rd.random_range.lo, 0.5);
 		assert_eq!(rd.volume, -20.0);
@@ -1190,8 +1250,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 2);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (64, 0));
-		assert_eq!(rd.on_hi_cc, (64, 1));
+		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(1).unwrap()));
 		assert_eq!(rd.random_range.hi, 0.5);
 		assert_eq!(rd.random_range.lo, 0.0);
 		assert_eq!(rd.volume, -19.0);
@@ -1214,8 +1273,7 @@ mod tests {
 		assert_eq!(rd.pitch_keytrack, 100.0);
 		assert_eq!(rd.group, 2);
 		assert_eq!(rd.off_by, 0);
-		assert_eq!(rd.on_lo_cc, (64, 0));
-		assert_eq!(rd.on_hi_cc, (64, 1));
+		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(0).unwrap()));
 		assert_eq!(rd.random_range.hi, 1.0);
 		assert_eq!(rd.random_range.lo, 0.5);
 		assert_eq!(rd.volume, -19.0);
@@ -1446,6 +1504,36 @@ mod tests {
 	assert!(!region.is_active());
     }
 
+    #[test]
+    fn region_trigger_cc() {
+	let mut rd = RegionData::default();
+	rd.push_on_lo_cc(64, 63);
+	rd.push_on_hi_cc(64, 127);
+	rd.push_on_hi_cc(42, 23);
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(wmidi::Channel::Ch1,
+								wmidi::ControlNumber::try_from(23).unwrap(),
+								wmidi::ControlValue::try_from(90).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(wmidi::Channel::Ch1,
+								wmidi::ControlNumber::try_from(64).unwrap(),
+								wmidi::ControlValue::try_from(23).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(wmidi::Channel::Ch1,
+								wmidi::ControlNumber::try_from(42).unwrap(),
+								wmidi::ControlValue::try_from(21).unwrap()));
+	assert!(!region.is_active());
+
+	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(wmidi::Channel::Ch1,
+								wmidi::ControlNumber::try_from(64).unwrap(),
+								wmidi::ControlValue::try_from(90).unwrap()));
+	assert!(region.is_active());
+
+    }
 
 
     #[test]

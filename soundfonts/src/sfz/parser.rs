@@ -228,26 +228,23 @@ fn take_opcode(region: &mut engine::RegionData, key: &str, value: &str) -> Resul
 	"off_by" => { region.set_off_by(value.parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?); Ok(()) },
 	"sample" => { region.set_sample(value); Ok(()) },
 	"trigger" => { region.set_trigger(parse_trigger(value)?); Ok(()) },
-	s => {
-	    match s.find("cc") {
-		None => {},
-		Some(n) => {
-		    let (key_cc, ns) = s.split_at(n);
-		    let cc_num = ns.get(2..).unwrap().parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?;
-		    if cc_num > 127 {
-			return Err(ParserError::RangeError(RangeError::out_of_range("cc number", 0, 127, cc_num)))
-		    }
+	s => match s.find("cc") {
+	    Some(n) => {
+		let (key_cc, ns) = s.split_at(n);
+		let cc_num = ns.get(2..).unwrap().parse::<u32>().map_err(|pe| ParserError::ParseIntError(pe))?;
+		if cc_num > 127 {
+		    Err(ParserError::RangeError(RangeError::out_of_range("cc number", 0, 127, cc_num)))
+		} else {
 		    let value = value.parse::<i32>().map_err(|pe| ParserError::ParseIntError(pe))?;
 
 		    match key_cc {
-			"on_lo" => region.set_on_lo_cc(cc_num, value),
-			"on_hi" => region.set_on_hi_cc(cc_num, value),
-			_ => return Err(ParserError::KeyError(key_cc.to_string()))
+			"on_lo" => region.push_on_lo_cc(cc_num, value).map_err(|re| ParserError::RangeError(re)),
+			"on_hi" => region.push_on_hi_cc(cc_num, value).map_err(|re| ParserError::RangeError(re)),
+			_ => Err(ParserError::KeyError(key_cc.to_string()))
 		    }
-		    return Ok(());
 		}
-	    };
-	    return Err(ParserError::KeyError(key.to_string()))
+	    }
+	    None => Err(ParserError::KeyError(key.to_string())),
 	}
     }
 }
