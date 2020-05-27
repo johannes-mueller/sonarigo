@@ -361,7 +361,9 @@ pub(super) struct Region {
     last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     other_notes_on: HashSet<u8>,
 
-    sustain_pedal_pushed: bool
+    sustain_pedal_pushed: bool,
+
+    once_immune_against_group_events: bool,
 }
 
 impl Region {
@@ -388,7 +390,9 @@ impl Region {
 	    last_note_on: None,
 	    other_notes_on: HashSet::new(),
 
-	    sustain_pedal_pushed: false
+	    sustain_pedal_pushed: false,
+
+	    once_immune_against_group_events: false
 	}
     }
 
@@ -422,10 +426,6 @@ impl Region {
     }
 
     fn note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
-	if self.is_active() {
-	    return;
-	}
-
 	let velocity = u8::from(velocity);
 	let vel = if self.params.amp_veltrack < 0.0 {
 	    127 - velocity
@@ -447,7 +447,6 @@ impl Region {
 
 	self.sample.note_on();
 	self.amp_envelope.note_on();
-
     }
 
     fn note_off(&mut self) {
@@ -467,54 +466,68 @@ impl Region {
 	}
     }
 
-    fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
+    fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) -> bool {
+	if self.is_active() {
+	    return false;
+	}
+
 	if !self.params.key_range.covering(note) {
 	    self.other_notes_on.insert(u8::from(note));
-	    return;
+	    return false;
 	}
 
 	if !self.params.vel_range.covering(velocity) {
-	    return;
+	    return false;
 	}
 
  	match self.params.trigger {
 	    Trigger::Release |
 	    Trigger::ReleaseKey => {
 		self.last_note_on = Some((note, velocity));
-		return
+		return false
 	    }
 	    Trigger::First => {
 		if !self.other_notes_on.is_empty() {
-		    return;
+		    return false;
 		}
 	    }
 	    Trigger::Legato => {
 		if self.other_notes_on.is_empty() {
-		    return;
+		    return false;
 		}
 	    }
 	    _ => {}
 	}
 	self.note_on(note, velocity);
+	true
     }
 
-    fn handle_note_off(&mut self, note: wmidi::Note) {
+    fn handle_note_off(&mut self, note: wmidi::Note) -> bool {
 	if !self.params.key_range.covering(note) {
 	    self.other_notes_on.remove(&u8::from(note));
-	    return;
+	    return false;
 	}
 	match self.params.trigger {
 	    Trigger::Release |
-	    Trigger::ReleaseKey => self.last_note_on.map_or((), |(note, velocity)| self.note_on(note,velocity)),
+	    Trigger::ReleaseKey => {
+		match self.last_note_on {
+		    Some((note, velocity)) => {
+			self.note_on(note, velocity);
+			true
+		    }
+		    None => false
+		}
+	    }
 	    _ => {
 		if !self.sustain_pedal_pushed {
 		    self.note_off();
 		}
+		false
 	    }
 	}
     }
 
-    fn handle_control_event(&mut self, control_number: wmidi::ControlNumber, control_value: wmidi::ControlValue) {
+    fn handle_control_event(&mut self, control_number: wmidi::ControlNumber, control_value: wmidi::ControlValue) -> bool {
 	let (cnum, cval) = (u8::from(control_number), u8::from(control_value));
 
 	match cnum {
@@ -523,19 +536,35 @@ impl Region {
 	}
 
 	match self.params.on_ccs.get(&cnum) {
-	    Some(cvrange) => if cvrange.covering(control_value) {
-		self.note_on(self.params.pitch_keycenter, wmidi::Velocity::MAX)
+	    Some(cvrange) if cvrange.covering(control_value) => {
+		self.note_on(self.params.pitch_keycenter, wmidi::Velocity::MAX);
+		true
 	    }
-	    None => {}
+	    _ => false
 	}
     }
 
-    fn pass_midi_msg(&mut self, midi_msg: &wmidi::MidiMessage) {
+    fn pass_midi_msg(&mut self, midi_msg: &wmidi::MidiMessage) -> bool {
+	self.once_immune_against_group_events = false;
 	match midi_msg {
 	    wmidi::MidiMessage::NoteOn(_ch, note, vel) => self.handle_note_on(*note, *vel),
 	    wmidi::MidiMessage::NoteOff(_ch, note, _vel) => self.handle_note_off(*note),
 	    wmidi::MidiMessage::ControlChange(_ch, cnum, cval) => self.handle_control_event(*cnum, *cval),
-	    _ => {}
+	    _ => false
+	}
+    }
+
+    fn group(&mut self) -> u32 {
+	self.once_immune_against_group_events = true;
+	self.params.group
+    }
+
+    fn group_activated(&mut self, group: u32) {
+	if self.once_immune_against_group_events {
+	    return;
+	}
+	if group == self.params.group || group == self.params.off_by {
+	    self.note_off();
 	}
     }
 }
@@ -552,15 +581,27 @@ impl Engine {
 	Engine {
 	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), samplerate, max_block_length)).collect(),
 	    samplerate: samplerate,
-	    max_block_length: 1
+	    max_block_length: 1,
 	}
     }
 }
 
 impl engine::EngineTrait for Engine {
     fn midi_event(&mut self, midi_msg: &wmidi::MidiMessage) {
+	let mut activated_groups = HashSet::new();
 	for r in &mut self.regions {
-	    r.pass_midi_msg(midi_msg);
+	    if r.pass_midi_msg(midi_msg) {
+		let group = r.group();
+		if group > 0 {
+		    dbg!(r.params.pitch_keycenter);
+		    activated_groups.insert(group);
+		}
+	    }
+	}
+	for group in activated_groups {
+	    for r in &mut self.regions {
+		    r.group_activated(group);
+	    }
 	}
     }
 
@@ -2022,6 +2063,88 @@ mod tests {
 	assert!(f32_eq(out_right[0], 0.5));
     }
 
+
+    #[test]
+    fn pitch_keytrack_frequency() {
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	//rd.set_pitch_keytrack(0.0);
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(0.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(-100.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 220.0));
+
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(1200.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
+
+    }
+
+    #[test]
+    fn tune_frequency() {
+	let mut rd = RegionData::default();
+	rd.tune = 1.0;
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	let mut rd = RegionData::default();
+	rd.tune = -1.0;
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+    }
+
+
     #[test]
     fn note_on_off_multiple_regions_key() {
 	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
@@ -2200,143 +2323,65 @@ mod tests {
 	}
     }
 
-
     #[test]
-    fn pitch_keytrack_frequency() {
-	let mut rd = RegionData::default();
-	rd.pitch_keycenter = wmidi::Note::A3;
-	//rd.set_pitch_keytrack(0.0);
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	region.note_off();
-
-	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
-
-	let mut rd = RegionData::default();
-	rd.pitch_keycenter = wmidi::Note::A3;
-	rd.set_pitch_keytrack(0.0).unwrap();
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	region.note_off();
-
-	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	let mut rd = RegionData::default();
-	rd.pitch_keycenter = wmidi::Note::A3;
-	rd.set_pitch_keytrack(-100.0).unwrap();
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	region.note_off();
-
-	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 220.0));
-
-
-	let mut rd = RegionData::default();
-	rd.pitch_keycenter = wmidi::Note::A3;
-	rd.set_pitch_keytrack(1200.0).unwrap();
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	region.note_off();
-
-	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
-
-    }
-
-    #[test]
-    fn tune_frequency() {
-	let mut rd = RegionData::default();
-	rd.tune = 1.0;
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-
-	let mut rd = RegionData::default();
-	rd.tune = -1.0;
-
-	let mut region = Region::new(rd, 1.0, 2);
-
-	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
-    }
-
-    /*
-
-
-//    #[test]
     fn region_group() {
-	let sample1 = vec![(0.1, -0.1), (0.1, -0.1), (0.1, -0.1), (0.1, -0.1), (0.1, -0.1)];
-	let sample2 = vec![(0.2, -0.2), (0.2, -0.2), (0.2, -0.2), (0.2, -0.2), (0.2, -0.2)];
-	let sample3 = vec![(0.3, -0.3), (0.3, -0.3), (0.3, -0.3), (0.3, -0.3), (0.3, -0.3)];
+	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
+	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
+	let sample3 = vec![                                     4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
+	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
+	let sample5 = vec![                                                   17e-3,  17e-4,  17e-5 , 17e-6];
 
-	let mut engine = Engine { regions: Vec::new() };
+	let region_text = "
+<region> key=a3
+<region> key=b3 group=1
+<region> key=c4 group=2
+<region> key=d4 off_by=2
+<region> key=e4 group=1
+".to_string();
+	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut region = Region::default();
-	region.sample_data = sample1.clone();
-	region.set_group(1);
+	let mut engine = Engine::new(regions, 1.0, 1);
 
-	engine.regions.push(region);
+	engine.regions[0].set_sample_data(sample1.clone());
+	engine.regions[1].set_sample_data(sample2.clone());
+	engine.regions[2].set_sample_data(sample3.clone());
+	engine.regions[3].set_sample_data(sample4.clone());
+	engine.regions[4].set_sample_data(sample5.clone());
 
-	let mut region = Region::default();
-	region.sample_data = sample2.clone();
-	region.set_group(1);
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
+	assert!(!engine.regions[4].is_active());
 
-	engine.regions.push(region);
+    	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::D3, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
+	assert!(!engine.regions[4].is_active());
 
-	let mut region = Region::default();
-	region.sample_data = sample3.clone();
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
+	assert!(!engine.regions[4].is_active());
 
-	engine.regions.push(region);
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
+	assert!(!engine.regions[4].is_active());
 
-	let mut out_left: [f32; 2] = [0.0, 0.0];
-	let mut out_right: [f32; 2] = [0.0, 0.0];
-
-	engine.regions[0].state.position = Some(0);
-	engine.regions[2].state.position = Some(0);
-	engine.process(&mut out_left, &mut out_right);
-
-	assert_eq!(out_left[0], 0.4);
-	assert_eq!(out_right[0], -0.4);
-	assert_eq!(out_left[1], 0.4);
-	assert_eq!(out_right[1], -0.4);
-
-	assert_eq!(engine.regions[0].state.position, Some(2));
-
-	let mut out_left: [f32; 2] = [0.0, 0.0];
-	let mut out_right: [f32; 2] = [0.0, 0.0];
-
-	engine.regions[1].state.position = Some(0);
-	engine.process(&mut out_left, &mut out_right);
-
-	assert_eq!(out_left[0], 0.5);
-	assert_eq!(out_right[0], -0.5);
-	assert_eq!(out_left[1], 0.5);
-	assert_eq!(out_right[1], -0.5);
-	assert_eq!(engine.regions[0].state.position, None);
-
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E3, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
+	assert!(engine.regions[4].is_active());
     }
 
-
-*/
 }
