@@ -360,6 +360,7 @@ pub(super) struct Region {
 
     last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     other_notes_on: HashSet<u8>,
+    time_since_note_on: f64,
 
     sustain_pedal_pushed: bool,
 
@@ -389,6 +390,7 @@ impl Region {
 
 	    last_note_on: None,
 	    other_notes_on: HashSet::new(),
+	    time_since_note_on: 0.0,
 
 	    sustain_pedal_pushed: false,
 
@@ -402,6 +404,8 @@ impl Region {
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+	self.time_since_note_on += out_left.len() as f64 / self.samplerate;
+
 	if !(self.sample.is_playing() && self.amp_envelope.is_playing_or_releasing()) {
 	    return;
 	}
@@ -439,12 +443,22 @@ impl Region {
 	    let vel = vel as f32;
 	    -20.0 * ((127.0 * 127.0)/(vel * vel)).log10()
 	};
-	self.gain = utils::dB_to_gain(self.params.volume + velocity_db * self.params.amp_veltrack.abs());
+
+	let rt_decay = match self.params.trigger {
+	    Trigger::Release |
+	    Trigger::ReleaseKey => self.time_since_note_on as f32 * (-self.params.rt_decay),
+	    _ => 0.0
+	};
+
+	self.gain = utils::dB_to_gain(self.params.volume + velocity_db * self.params.amp_veltrack.abs() + rt_decay);
+
+
 
 	let native_freq = self.params.pitch_keycenter.to_freq_f64();
 
 	self.current_note_frequency = native_freq * (note.to_freq_f64()/native_freq).powf(self.params.pitch_keytrack) * 2.0f64.powf(1.0/12.0 * self.params.tune);
 
+	self.time_since_note_on = 0.0;
 	self.sample.note_on();
 	self.amp_envelope.note_on();
     }
@@ -1594,6 +1608,63 @@ mod tests {
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(region.is_active());
 	assert_eq!(region.gain, 0.24607849215698431397);
+    }
+
+    #[test]
+    fn trigger_release_rt_decay() {
+    	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::Release);
+	rd.set_rt_decay(3.0);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, 1.0);
+
+	let mut out_left = [0.0];
+	let mut out_right = [0.0];
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.process(&mut out_left, &mut out_right);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, utils::dB_to_gain(-3.0));
+
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::Release);
+	rd.set_rt_decay(3.0);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, 1.0);
+
+	let mut out_left = [0.0, 0.0];
+	let mut out_right = [0.0, 0.0];
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.process(&mut out_left, &mut out_right);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, utils::dB_to_gain(-6.0));
+
+	let mut rd = RegionData::default();
+	rd.set_trigger(Trigger::Release);
+	rd.set_rt_decay(3.0);
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, 1.0);
+
+	let mut out_left = [0.0];
+	let mut out_right = [0.0];
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	region.process(&mut out_left, &mut out_right);
+	region.process(&mut out_left, &mut out_right);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert_eq!(region.gain, utils::dB_to_gain(-6.0));
+
+
     }
 
     #[test]
