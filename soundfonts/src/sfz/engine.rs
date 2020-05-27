@@ -214,7 +214,7 @@ pub struct RegionData {
 
     pitch_keycenter: wmidi::Note,
 
-    pitch_keytrack: f32,
+    pitch_keytrack: f64,
 
     amp_veltrack: f32,
 
@@ -223,7 +223,7 @@ pub struct RegionData {
     sample: String,
     rt_decay: f32,
 
-    tune: i8,
+    tune: f64,
 
     trigger: Trigger,
 
@@ -244,7 +244,7 @@ impl Default for RegionData {
 
 	    pitch_keycenter: wmidi::Note::C3,
 
-	    pitch_keytrack: 100.0,
+	    pitch_keytrack: 1.0,
 
 	    amp_veltrack: 1.0,
 
@@ -279,7 +279,7 @@ impl RegionData {
     }
 
     pub(super) fn set_pitch_keytrack(&mut self, v: f32) -> Result<(), RangeError> {
-	self.pitch_keytrack = range_check(v, -1200.0, 1200.0, "pitch_keytrack")?;
+	self.pitch_keytrack = range_check(v as f64, -1200.0, 1200.0, "pitch_keytrack")? / 100.0;
 	Ok(())
     }
 
@@ -293,7 +293,7 @@ impl RegionData {
     }
 
     pub(super) fn set_tune(&mut self, v: i32) -> Result<(), RangeError> {
-	self.tune = range_check(v, -100, 100, "tune")? as i8;
+	self.tune = range_check(v, -100, 100, "tune")? as f64 / 100.0;
 	Ok(())
     }
 
@@ -352,11 +352,11 @@ pub(super) struct Region {
 
     gain: f32,
 
-    samplerate: f32,
+    samplerate: f64,
     real_sample_length: usize,
     max_block_length: usize,
 
-    current_note_frequency: f32,
+    current_note_frequency: f64,
 
     last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     other_notes_on: HashSet<u8>,
@@ -365,15 +365,15 @@ pub(super) struct Region {
 }
 
 impl Region {
-    fn new(params: RegionData, samplerate: f32, max_block_length: usize) -> Region {
+    fn new(params: RegionData, samplerate: f64, max_block_length: usize) -> Region {
 
-	let amp_envelope = envelopes::ADSREnvelope::new(&params.ampeg, samplerate, max_block_length);
+	let amp_envelope = envelopes::ADSREnvelope::new(&params.ampeg, samplerate as f32, max_block_length);
 
 	Region {
 	    params: params,
 
 	    // FIXME: should be initialized
-	    sample: sample::Sample::new(Vec::new(), samplerate, max_block_length, 440.0),
+	    sample: sample::Sample::new(Vec::new(), max_block_length, 440.0),
 
 	    gain: 1.0,
 
@@ -394,7 +394,7 @@ impl Region {
 
     // # should be done in ::new()
     fn set_sample_data(&mut self, sample_data: Vec<f32>) {
-	self.sample = sample::Sample::new(sample_data, self.samplerate, self.max_block_length, self.params.pitch_keycenter.to_freq_f32());
+	self.sample = sample::Sample::new(sample_data, self.max_block_length, self.params.pitch_keycenter.to_freq_f64());
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
@@ -441,7 +441,9 @@ impl Region {
 	};
 	self.gain = utils::dB_to_gain(self.params.volume + velocity_db * self.params.amp_veltrack.abs());
 
-	self.current_note_frequency = note.to_freq_f32();
+	let native_freq = self.params.pitch_keycenter.to_freq_f64();
+
+	self.current_note_frequency = native_freq * (note.to_freq_f64()/native_freq).powf(self.params.pitch_keytrack) * 2.0f64.powf(1.0/12.0 * self.params.tune);
 
 	self.sample.note_on();
 	self.amp_envelope.note_on();
@@ -541,12 +543,12 @@ impl Region {
 
 pub struct Engine {
     pub(super) regions: Vec<Region>,
-    samplerate: f32,
+    samplerate: f64,
     max_block_length: usize
 }
 
 impl Engine {
-    fn new(reg_data: Vec<RegionData>, samplerate: f32, max_block_length: usize) -> Engine {
+    fn new(reg_data: Vec<RegionData>, samplerate: f64, max_block_length: usize) -> Engine {
 	Engine {
 	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), samplerate, max_block_length)).collect(),
 	    samplerate: samplerate,
@@ -580,9 +582,12 @@ mod tests {
     use super::super::parser::parse_sfz_text;
     use crate::engine::EngineTrait;
 
-    fn assert_f32_eq(a: f32, b: f32) {
+    fn f32_eq(a: f32, b: f32) -> bool {
 	if (a - b).abs() > f32::EPSILON {
-	    panic!("float equivalence check failed, a: {}, b: {}", a, b);
+	    println!("float equivalence check failed, a: {}, b: {}", a, b);
+	    false
+	} else {
+	    true
 	}
     }
 
@@ -601,7 +606,7 @@ mod tests {
 	let (sustain_env, _) = env.active_envelope();
 	assert_eq!(*sustain_env.as_slice(), [1.0; 4]);
 */
-	assert_eq!(rd.tune, 0)
+	assert_eq!(rd.tune, 0.0)
     }
 
     #[test]
@@ -1009,7 +1014,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
-		assert_eq!(rd.tune, 10);
+		assert_eq!(rd.tune, 0.1);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
 		assert_eq!(u8::from(rd.vel_range.hi), 26);
@@ -1017,7 +1022,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\A0v1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1032,7 +1037,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 1.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
-		assert_eq!(rd.tune, 10);
+		assert_eq!(rd.tune, 0.1);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
 		assert_eq!(u8::from(rd.vel_range.hi), 34);
@@ -1040,7 +1045,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\A0v2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1055,7 +1060,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
-		assert_eq!(rd.tune, -13);
+		assert_eq!(rd.tune, -0.13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::F5));
 		assert_eq!(u8::from(rd.vel_range.hi), 26);
@@ -1063,7 +1068,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\F#6v1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1078,7 +1083,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.73);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 5.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::Gb5);
-		assert_eq!(rd.tune, -13);
+		assert_eq!(rd.tune, -0.13);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::G5));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::F5));
 		assert_eq!(u8::from(rd.vel_range.hi), 34);
@@ -1086,7 +1091,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\F#6v2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1101,7 +1106,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.94);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::AMinus1);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::BbMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AbMinus1));
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1109,7 +1114,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\harmLA0.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 6.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1124,7 +1129,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.94);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C0);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::Db0));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::BMinus1));
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1132,7 +1137,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\harmLC1.wav");
 		assert_eq!(rd.trigger, Trigger::Release);
 		assert_eq!(rd.rt_decay, 6.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 0);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.is_empty(), (0, 0));
@@ -1147,7 +1152,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::AMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::AMinus1));
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1170,7 +1175,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 0.82);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, Some(wmidi::Note::ASharpMinus1));
 		assert_eq!(rd.key_range.lo, Some(wmidi::Note::ASharpMinus1));
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1193,7 +1198,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1201,7 +1206,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\pedalD1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 1);
 		assert_eq!(rd.off_by, 2);
 		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(126).unwrap()));
@@ -1216,7 +1221,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1224,7 +1229,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\pedalD2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 1);
 		assert_eq!(rd.off_by, 2);
 		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(127).unwrap()));
@@ -1239,7 +1244,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1247,7 +1252,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\pedalU1.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 2);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(1).unwrap()));
@@ -1262,7 +1267,7 @@ mod tests {
 		assert_eq!(rd.amp_veltrack, 1.0);
 		// FIXME: how to test this? assert_eq!(rd.ampeg.release, 0.0);
 		assert_eq!(rd.pitch_keycenter, wmidi::Note::C3);
-		assert_eq!(rd.tune, 0);
+		assert_eq!(rd.tune, 0.0);
 		assert_eq!(rd.key_range.hi, None);
 		assert_eq!(rd.key_range.lo, None);
 		assert_eq!(rd.vel_range.hi, wmidi::Velocity::MAX);
@@ -1270,7 +1275,7 @@ mod tests {
 		assert_eq!(rd.sample, "48khz24bit\\pedalU2.wav");
 		assert_eq!(rd.trigger, Trigger::Attack);
 		assert_eq!(rd.rt_decay, 0.0);
-		assert_eq!(rd.pitch_keytrack, 100.0);
+		assert_eq!(rd.pitch_keytrack, 1.0);
 		assert_eq!(rd.group, 2);
 		assert_eq!(rd.off_by, 0);
 		assert!(rd.on_ccs.get(&64).unwrap().covering(wmidi::ControlValue::try_from(0).unwrap()));
@@ -1311,11 +1316,11 @@ mod tests {
 	let mut out_right: [f32; 2] = [0.0, 0.0];
 
 	region.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 1.0);
-	assert_eq!(out_left[1], 0.5);
+	assert!(f32_eq(out_left[0], 1.0));
+	assert!(f32_eq(out_left[1], 0.5));
 
-	assert_eq!(out_right[0], 0.5);
-	assert_eq!(out_right[1], 1.0);
+	assert!(f32_eq(out_right[0], 0.5));
+	assert!(f32_eq(out_right[1], 1.0));
 
 	assert!(region.is_active());
 
@@ -1323,11 +1328,11 @@ mod tests {
 	let mut out_right: [f32; 2] = [-0.2, -0.5];
 
 	region.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.5);
-	assert_eq!(out_left[1], -0.2);
+	assert!(f32_eq(out_left[0], 0.5));
+	assert!(f32_eq(out_left[1], -0.2));
 
-	assert_eq!(out_right[0], 0.3);
-	assert_eq!(out_right[1], -0.5);
+	assert!(f32_eq(out_right[0], 0.3));
+	assert!(f32_eq(out_right[1], -0.5));
 
 	assert!(!region.is_active());
     }
@@ -1463,8 +1468,8 @@ mod tests {
     #[test]
     fn note_trigger_key_range() {
 	let mut rd = RegionData::default();
-	rd.key_range.set_hi(70);
-	rd.key_range.set_lo(60);
+	rd.key_range.set_hi(70).unwrap();
+	rd.key_range.set_lo(60).unwrap();
 	let mut region = Region::new(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MAX));
@@ -1485,8 +1490,8 @@ mod tests {
     #[test]
     fn note_trigger_vel_range() {
 	let mut rd = RegionData::default();
-	rd.vel_range.set_hi(70);
-	rd.vel_range.set_lo(60);
+	rd.vel_range.set_hi(70).unwrap();
+	rd.vel_range.set_lo(60).unwrap();
 	let mut region = Region::new(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()));
@@ -1507,9 +1512,9 @@ mod tests {
     #[test]
     fn region_trigger_cc() {
 	let mut rd = RegionData::default();
-	rd.push_on_lo_cc(64, 63);
-	rd.push_on_hi_cc(64, 127);
-	rd.push_on_hi_cc(42, 23);
+	rd.push_on_lo_cc(64, 63).unwrap();
+	rd.push_on_hi_cc(64, 127).unwrap();
+	rd.push_on_hi_cc(42, 23).unwrap();
 
 	let mut region = Region::new(rd, 1.0, 2);
 
@@ -1636,8 +1641,8 @@ mod tests {
     fn note_trigger_release_key_vel_range() {
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::ReleaseKey);
-	rd.vel_range.set_hi(70);
-	rd.vel_range.set_lo(60);
+	rd.vel_range.set_hi(70).unwrap();
+	rd.vel_range.set_lo(60).unwrap();
 	let mut region = Region::new(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()));
@@ -1920,7 +1925,7 @@ mod tests {
     fn note_on_gain_veltrack() {
 	let sample = vec![1.0, 1.0];
 	let mut rd = RegionData::default();
-	rd.set_amp_veltrack(0.0);
+	rd.set_amp_veltrack(0.0).unwrap();
 
 	let mut region = Region::new(rd, 1.0, 16);
 
@@ -1948,7 +1953,7 @@ mod tests {
 
 
 	let mut rd = RegionData::default();
-	rd.set_amp_veltrack(-100.0);
+	rd.set_amp_veltrack(-100.0).unwrap();
 
 	let mut region = Region::new(rd, 1.0, 16);
 
@@ -1979,7 +1984,7 @@ mod tests {
     #[test]
     fn note_on_off_key_range() {
 	let sample = vec![1.0, 1.0,
-			      0.5, 0.5];
+			  0.5, 0.5];
 
 	let regions = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap();
 
@@ -1993,9 +1998,8 @@ mod tests {
 	let mut out_right: [f32; 1] = [0.0];
 
 	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.0);
-	assert_eq!(out_right[0], 0.0);
-
+	assert!(f32_eq(out_left[0], 0.0));
+	assert!(f32_eq(out_right[0], 0.0));
 
 	engine.regions[0].set_sample_data(sample.clone());
 
@@ -2005,8 +2009,8 @@ mod tests {
 	let mut out_right: [f32; 1] = [0.0];
 
 	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 1.0);
-	assert_eq!(out_right[0], 1.0);
+	assert!(f32_eq(out_left[0], 1.0));
+	assert!(f32_eq(out_right[0], 1.0));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 
@@ -2014,8 +2018,8 @@ mod tests {
 	let mut out_right: [f32; 1] = [0.0];
 
 	engine.process(&mut out_left, &mut out_right);
-	assert_eq!(out_left[0], 0.5);
-	assert_eq!(out_right[0], 0.5);
+	assert!(f32_eq(out_left[0], 0.5));
+	assert!(f32_eq(out_right[0], 0.5));
     }
 
     #[test]
@@ -2047,8 +2051,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 0.0);
-	    assert_f32_eq(out_right[0], 0.0);
+	    assert!(f32_eq(out_left[0], 0.0));
+	    assert!(f32_eq(out_right[0], 0.0));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 
@@ -2056,8 +2060,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 1e1);
-	    assert_f32_eq(out_right[0], 1e2);
+	    assert!(f32_eq(out_left[0], 1e1));
+	    assert!(f32_eq(out_right[0], 1e2));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 
@@ -2065,8 +2069,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], -7e3);
-	    assert_f32_eq(out_right[0], -7e4);
+	    assert!(f32_eq(out_left[0], -7e3));
+	    assert!(f32_eq(out_right[0], -7e4));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
@@ -2074,8 +2078,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], -1e5);
-	    assert_f32_eq(out_right[0], -1e6);
+	    assert!(f32_eq(out_left[0], -1e5));
+	    assert!(f32_eq(out_right[0], -1e6));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 
@@ -2083,8 +2087,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], -2e-1);
-	    assert_f32_eq(out_right[0], -2e-2);
+	    assert!(f32_eq(out_left[0], -2e-1));
+	    assert!(f32_eq(out_right[0], -2e-2));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 
@@ -2092,8 +2096,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 6e-3);
-	    assert_f32_eq(out_right[0], 6e-4);
+	    assert!(f32_eq(out_left[0], 6e-3));
+	    assert!(f32_eq(out_right[0], 6e-4));
 
 	    // no effect because sustaining
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
@@ -2102,8 +2106,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 6e-5);
-	    assert_f32_eq(out_right[0], 6e-6);
+	    assert!(f32_eq(out_left[0], 6e-5));
+	    assert!(f32_eq(out_right[0], 6e-6));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
@@ -2111,8 +2115,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 0.0);
-	    assert_f32_eq(out_right[0], 0.0);
+	    assert!(f32_eq(out_left[0], 0.0));
+	    assert!(f32_eq(out_right[0], 0.0));
 	}
     }
 
@@ -2145,8 +2149,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 0.0);
-	    assert_f32_eq(out_right[0], 0.0);
+	    assert!(f32_eq(out_left[0], 0.0));
+	    assert!(f32_eq(out_right[0], 0.0));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(30).unwrap()));
 
@@ -2154,8 +2158,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 1e1);
-	    assert_f32_eq(out_right[0], 1e2);
+	    assert!(f32_eq(out_left[0], 1e1));
+	    assert!(f32_eq(out_right[0], 1e2));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(55).unwrap()));
 
@@ -2163,8 +2167,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], -7e3);
-	    assert_f32_eq(out_right[0], -7e4);
+	    assert!(f32_eq(out_left[0], -7e3));
+	    assert!(f32_eq(out_right[0], -7e4));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(50).unwrap()));
 
@@ -2172,8 +2176,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], -1e5);
-	    assert_f32_eq(out_right[0], -1e6);
+	    assert!(f32_eq(out_left[0], -1e5));
+	    assert!(f32_eq(out_right[0], -1e6));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
 	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(45).unwrap()));
@@ -2182,8 +2186,8 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 4e5);
-	    assert_f32_eq(out_right[0], 4e6);
+	    assert!(f32_eq(out_left[0], 4e5));
+	    assert!(f32_eq(out_right[0], 4e6));
 
 	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
 
@@ -2191,11 +2195,91 @@ mod tests {
 	    let mut out_right: [f32; 1] = [0.0];
 
 	    engine.process(&mut out_left, &mut out_right);
-	    assert_f32_eq(out_left[0], 0.0);
-	    assert_f32_eq(out_right[0], 0.0);
+	    assert!(f32_eq(out_left[0], 0.0));
+	    assert!(f32_eq(out_right[0], 0.0));
 	}
     }
 
+
+    #[test]
+    fn pitch_keytrack_frequency() {
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	//rd.set_pitch_keytrack(0.0);
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(0.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(-100.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 220.0));
+
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(1200.0).unwrap();
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	region.note_off();
+
+	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
+
+    }
+
+    #[test]
+    fn tune_frequency() {
+	let mut rd = RegionData::default();
+	rd.tune = 1.0;
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+
+	let mut rd = RegionData::default();
+	rd.tune = -1.0;
+
+	let mut region = Region::new(rd, 1.0, 2);
+
+	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
+	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+    }
 
     /*
 

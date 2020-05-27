@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 pub struct Sample {
     sample_data: Vec<f32>,
@@ -7,11 +7,11 @@ pub struct Sample {
     real_sample_length: usize,
     max_block_length: usize,
 
-    native_frequency: f32,
+    native_frequency: f64,
 }
 
 impl Sample {
-    pub fn new(mut sample_data: Vec<f32>, samplerate: f32, max_block_length: usize, native_frequency: f32) -> Self {
+    pub fn new(mut sample_data: Vec<f32>, max_block_length: usize, native_frequency: f64) -> Self {
 	let real_sample_length = sample_data.len();
 	let frames = real_sample_length / 2;
 
@@ -41,14 +41,15 @@ impl Sample {
 	self.position = None;
     }
 
-    pub fn iter(&mut self, frequency: f32) -> SampleIterator {
+    pub fn iter(&mut self, frequency: f64) -> SampleIterator {
 	let pos = self.position.unwrap();
 	let ratio = frequency / self.native_frequency;
+//	println!("ratio {}", ratio);
 	SampleIterator {
 	    sample: self,
 	    pos: pos,
 
-	    freq_ratio: ratio
+	    freq_ratio: ratio as f32
 	}
     }
 
@@ -77,10 +78,10 @@ fn cubic(sample_data: &[f32], pos: usize, remainder: f32) -> f32 {
     let p3 = sample_data[pos+4];
 
     let a = remainder;
-    let b = 1.0 - a;
+    let b = 1.0f32 - a;
     let c = a * b;
 
-    let r = (1.0 + 1.5 * c) * (p1 * b + p2 * a) - 0.5 * c * (p0 * b + p1 + p2 + p3 * a);
+    let r = (1.0f32  + 1.5f32 * c) * (p1 * b + p2 * a) - 0.5f32 * c * (p0 * b + p1 + p2 + p3 * a);
 
 //    println!("res {} {} {} {} : {} -> {}", p0, p1, p2, p3, remainder, r);
     r
@@ -129,7 +130,7 @@ mod tests {
 		     3.0, -3.0,
 		     4.0, -4.0,
 		     0.0, 0.0];
-	let mut sample = Sample::new(v, 1.0, 8, 1.0);
+	let mut sample = Sample::new(v, 8, 1.0);
 	sample.note_on();
 
 	let mut it = sample.iter(1.0);
@@ -151,20 +152,20 @@ mod tests {
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let sample = Sample::new(sample, 1.0, 16, 440.0);
+	let sample = Sample::new(sample, 16, 440.0);
 	assert_eq!(sample.sample_data.len(), 64);
     }
 
 
-    fn make_test_sample(nsamples: usize, samplerate: f32, freq: f32) -> Sample {
+    fn make_test_sample(nsamples: usize, samplerate: f64, freq: f64) -> Sample {
 	let omega = freq/samplerate * 2.0*PI;
-	let sample_data = (0..nsamples*2).map(|t| ((omega * (t/2) as f32).sin())).collect();
+	let sample_data = (0..nsamples*2).map(|t| ((omega * (t/2) as f64).sin() as f32)).collect();
 
-	Sample::new(sample_data, samplerate, 4096, freq)
+	Sample::new(sample_data, 4096, freq)
     }
 
 
-    fn assert_frequency(mut sample: Sample, samplerate: f32, test_freq: f32) {
+    fn assert_frequency(mut sample: Sample, samplerate: f64, test_freq: f64) {
 	let mut i = 0;
 	let mut halfw_l = 0.0;
 	let mut halfw_r = 0.0;
@@ -190,7 +191,7 @@ mod tests {
 	    }
 	}
 
-	let to_freq = samplerate/((sample.real_sample_length/2) as f32);
+	let to_freq = samplerate/((sample.real_sample_length/2) as f64);
 
 	if  halfw_l * to_freq > test_freq || (halfw_l + 1.0) * to_freq < test_freq {
 	    panic!("left frequency does not match {} {} {}", halfw_l * to_freq, (halfw_l + 1.0) * to_freq, test_freq)
