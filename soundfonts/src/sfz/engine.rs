@@ -3,8 +3,6 @@ use std::convert::TryFrom;
 
 use itertools::izip;
 
-use rand::prelude::*;
-
 use crate::errors::*;
 use crate::engine;
 use crate::sample;
@@ -59,39 +57,31 @@ pub(super) struct NoteRange {
 
 impl NoteRange {
     pub(super) fn set_hi(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    -1 => {
-		self.hi = None;
-		Ok(())
-	    }
-	    v if v < 0 && v > 127 => Err(RangeError::out_of_range("hikey", -1, 127, v)),
-	    _ => {
-		let note = unsafe { wmidi::Note::from_u8_unchecked(v as u8) };
-		if self.lo.map_or(false, |n| note < n) {
-		    return Err(RangeError::flipped_range("hikey", v, u8::from(note) as i32));
-		}
-		self.hi = Some(note);
-		Ok(())
-	    }
+	if v == -1 {
+	    self.hi = None;
+	    return Ok(());
 	}
+
+	let note = wmidi::Note::try_from(v as u8).map_err(|_| RangeError::out_of_range("hikey", -1, 127, v))?;
+	if self.lo.map_or(false, |n| note < n) {
+	    return Err(RangeError::flipped_range("hikey", v, u8::from(note) as i32));
+	}
+	self.hi = Some(note);
+	Ok(())
     }
 
     pub(super) fn set_lo(&mut self, v: i32) -> Result<(), RangeError> {
-	match v {
-	    -1 => {
-		self.lo = None;
-		Ok(())
-	    }
-	    v if v > 127 => Err(RangeError::out_of_range("lokey", -1, 127, v)),
-	    _ => {
-		let note = unsafe { wmidi::Note::from_u8_unchecked(v as u8) };
-		if self.hi.map_or(false, |n| note > n) {
-		    return Err(RangeError::flipped_range("lokey", v, u8::from(note) as i32));
-		}
-		self.lo = Some(note);
-		Ok(())
-	    }
+	if v == -1 {
+	    self.lo = None;
+	    return Ok(());
 	}
+
+	let note = wmidi::Note::try_from(v as u8).map_err(|_| RangeError::out_of_range("lokey", -1, 127, v))?;
+	if self.hi.map_or(false, |n| note > n) {
+	    return Err(RangeError::flipped_range("lokey", v, u8::from(note) as i32));
+	}
+	self.lo = Some(note);
+	Ok(())
     }
 
     pub(super) fn covering(&self, note: wmidi::Note) -> bool {
@@ -359,8 +349,6 @@ pub(super) struct Region {
     gain: f32,
 
     samplerate: f64,
-    real_sample_length: usize,
-    max_block_length: usize,
 
     current_note_frequency: f64,
 
@@ -374,23 +362,21 @@ pub(super) struct Region {
 }
 
 impl Region {
-    fn new(params: RegionData, samplerate: f64, max_block_length: usize) -> Region {
+    fn new(params: RegionData, sample_data: Vec<f32>, samplerate: f64, max_block_length: usize) -> Region {
 
 	let amp_envelope = envelopes::ADSREnvelope::new(&params.ampeg, samplerate as f32, max_block_length);
+	let sample = sample::Sample::new(sample_data, max_block_length, params.pitch_keycenter.to_freq_f64());
 
 	Region {
 	    params: params,
 
-	    // FIXME: should be initialized
-	    sample: sample::Sample::new(Vec::new(), max_block_length, 440.0),
+	    sample: sample,
 
 	    gain: 1.0,
 
 	    amp_envelope: amp_envelope,
 
 	    samplerate: samplerate,
-	    max_block_length: max_block_length,
-	    real_sample_length: 0,
 
 	    current_note_frequency: 0.0,
 
@@ -402,11 +388,6 @@ impl Region {
 
 	    once_immune_against_group_events: false
 	}
-    }
-
-    // # should be done in ::new()
-    fn set_sample_data(&mut self, sample_data: Vec<f32>) {
-	self.sample = sample::Sample::new(sample_data, self.max_block_length, self.params.pitch_keycenter.to_freq_f64());
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
@@ -428,7 +409,6 @@ impl Region {
 	}
 
 	self.amp_envelope.update(env_position);
-
     }
 
     fn is_active(&self) -> bool {
@@ -598,16 +578,12 @@ impl Region {
 
 pub struct Engine {
     pub(super) regions: Vec<Region>,
-    samplerate: f64,
-    max_block_length: usize
 }
 
 impl Engine {
-    fn new(reg_data: Vec<RegionData>, samplerate: f64, max_block_length: usize) -> Engine {
+    fn new(reg_data_sample: Vec<(RegionData, Vec<f32>)>, samplerate: f64, max_block_length: usize) -> Engine {
 	Engine {
-	    regions: reg_data.iter().map(|rd| Region::new(rd.clone(), samplerate, max_block_length)).collect(),
-	    samplerate: samplerate,
-	    max_block_length: 1,
+	    regions: reg_data_sample.iter().map(|(rd, sample)| Region::new(rd.clone(), sample.to_vec(), samplerate, max_block_length)).collect(),
 	}
     }
 }
@@ -616,12 +592,10 @@ impl engine::EngineTrait for Engine {
     fn midi_event(&mut self, midi_msg: &wmidi::MidiMessage) {
 	let mut activated_groups = HashSet::new();
 	let random_value = rand::random();
-	println!("Ramdom value {}", random_value);
 	for r in &mut self.regions {
 	    if r.pass_midi_msg(midi_msg, random_value) {
 		let group = r.group();
 		if group > 0 {
-		    dbg!(r.params.pitch_keycenter);
 		    activated_groups.insert(group);
 		}
 	    }
@@ -1376,8 +1350,7 @@ mod tests {
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let mut region = Region::new(RegionData::default(), 1.0, 8);
-	region.set_sample_data(sample);
+	let mut region = Region::new(RegionData::default(), sample, 1.0, 8);
 
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
@@ -1413,8 +1386,7 @@ mod tests {
 	let mut region_data = RegionData::default();
 	region_data.set_volume(-20.0).unwrap();
 
-	let mut region = Region::new(region_data, 1.0, 8);
-	region.set_sample_data(sample.clone());
+	let mut region = Region::new(region_data, sample, 1.0, 8);
 
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
@@ -1433,8 +1405,7 @@ mod tests {
 	sample.resize(32, 1.0);
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 16);
-	region.set_sample_data(sample.clone());
+	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 16);
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
@@ -1452,8 +1423,7 @@ mod tests {
 
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut region = Region::new(regions.get(0).unwrap().clone(), 1.0, 12);
-	region.set_sample_data(sample.clone());
+	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 12);
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
@@ -1489,7 +1459,7 @@ mod tests {
 
     #[test]
     fn engine_process_silence() {
-	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
+	let mut engine = Engine::new(vec![(RegionData::default(), Vec::new()), (RegionData::default(), Vec::new())], 1.0, 16);
 
 	let mut out_left: [f32; 4] = [1.0; 4];
 	let mut out_right: [f32; 4] = [1.0; 4];
@@ -1510,11 +1480,9 @@ mod tests {
 			   -0.5, -0.5,
 			   0.0, 0.5];
 
-	let mut engine = Engine::new(vec![RegionData::default(), RegionData::default()], 1.0, 16);
+	let mut engine = Engine::new(vec![(RegionData::default(), sample1), (RegionData::default(), sample2)], 1.0, 16);
 
-	engine.regions[0].set_sample_data(sample1);
 	engine.regions[0].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
-	engine.regions[1].set_sample_data(sample2);
 	engine.regions[1].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -1539,7 +1507,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.key_range.set_hi(70).unwrap();
 	rd.key_range.set_lo(60).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MAX), 0.0);
 	assert!(!region.is_active());
@@ -1561,7 +1529,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.vel_range.set_hi(70).unwrap();
 	rd.vel_range.set_lo(60).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()), 0.0);
 	assert!(!region.is_active());
@@ -1586,7 +1554,7 @@ mod tests {
 	rd.push_on_hi_cc(64, 127).unwrap();
 	rd.push_on_hi_cc(42, 23).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(wmidi::Channel::Ch1,
 								wmidi::ControlNumber::try_from(23).unwrap(),
@@ -1615,7 +1583,7 @@ mod tests {
     fn note_trigger_release() {
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
@@ -1630,7 +1598,7 @@ mod tests {
     	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
 	rd.set_rt_decay(3.0).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
@@ -1647,7 +1615,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
 	rd.set_rt_decay(3.0).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
@@ -1664,7 +1632,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
 	rd.set_rt_decay(3.0).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
@@ -1686,20 +1654,20 @@ mod tests {
     fn note_trigger_release_sustain_pedal() {
     	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(!region.is_active());
@@ -1707,18 +1675,18 @@ mod tests {
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(region.is_active());
@@ -1727,23 +1695,23 @@ mod tests {
 
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::Release);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
 
     	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(region.is_active());
@@ -1754,9 +1722,9 @@ mod tests {
     fn note_trigger_release_key() {
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::ReleaseKey);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
@@ -1770,7 +1738,7 @@ mod tests {
 	rd.set_trigger(Trigger::ReleaseKey);
 	rd.vel_range.set_hi(70).unwrap();
 	rd.vel_range.set_lo(60).unwrap();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()), 0.0);
 	assert!(!region.is_active());
@@ -1792,20 +1760,20 @@ mod tests {
     fn note_trigger_release_key_sustain_pedal() {
     	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::ReleaseKey);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(!region.is_active());
@@ -1813,18 +1781,18 @@ mod tests {
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(!region.is_active());
@@ -1832,23 +1800,23 @@ mod tests {
 
 	let mut rd = RegionData::default();
 	rd.set_trigger(Trigger::ReleaseKey);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
-	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, unsafe { wmidi::Velocity::from_unchecked(63) }), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.is_active());
 
     	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(!region.is_active());
@@ -1860,7 +1828,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::First);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 	assert!(region.is_active());
@@ -1869,7 +1837,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::First);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
@@ -1879,7 +1847,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::First);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
@@ -1893,7 +1861,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::Legato);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 	assert!(!region.is_active());
@@ -1902,7 +1870,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::Legato);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
@@ -1912,7 +1880,7 @@ mod tests {
 	rd.key_range.set_hi(60).unwrap();
 	rd.key_range.set_lo(60).unwrap();
 	rd.set_trigger(Trigger::Legato);
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
@@ -1923,7 +1891,7 @@ mod tests {
     #[test]
     fn note_off_sustain_pedal() {
 	let rd = RegionData::default();
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 	assert!(region.is_active());
@@ -1931,8 +1899,8 @@ mod tests {
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
 	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(64) }
+	    wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(64).unwrap()
 	), 0.0);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
@@ -1940,9 +1908,8 @@ mod tests {
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
-	    wmidi::Channel::Ch1,
-	    unsafe { wmidi::ControlNumber::from_unchecked(64) },
-	    unsafe { wmidi::ControlValue::from_unchecked(63) }
+	    wmidi::Channel::Ch1, wmidi::ControlNumber::try_from(64).unwrap(),
+	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
 	assert!(!region.is_active());
@@ -1958,9 +1925,7 @@ mod tests {
 			  0.4, -0.4,
 			  0.5, -0.5];
 
-	let mut engine = Engine::new(vec![RegionData::default()], 1.0, 16);
-
-	engine.regions[0].set_sample_data(sample.clone());
+	let mut engine = Engine::new(vec![(RegionData::default(), sample)], 1.0, 16);
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -1997,9 +1962,7 @@ mod tests {
 	sample.resize(48, 1.0);
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut engine = Engine::new(regions, 1.0, 16);
-
-	engine.regions[0].set_sample_data(sample.clone());
+	let mut engine = Engine::new(vec![(regions[0].clone(), sample)], 1.0, 16);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -2033,11 +1996,7 @@ mod tests {
     #[test]
     fn note_on_velocity() {
 	let sample = vec![1.0, 1.0];
-
-	let mut region = Region::new(RegionData::default(), 1.0, 16);
-
-	region.set_sample_data(sample.clone());
-
+	let mut region = Region::new(RegionData::default(), sample, 1.0, 16);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 
 	let mut out_left: [f32; 1] = [0.0];
@@ -2054,9 +2013,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_amp_veltrack(0.0).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 16);
-
-	region.set_sample_data(sample.clone());
+	let mut region = Region::new(rd, sample.clone(), 1.0, 16);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 
@@ -2082,9 +2039,8 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_amp_veltrack(-100.0).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 16);
+	let mut region = Region::new(rd, sample.clone(), 1.0, 16);
 
-	region.set_sample_data(sample.clone());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
 
@@ -2113,11 +2069,9 @@ mod tests {
 	let sample = vec![1.0, 1.0,
 			  0.5, 0.5];
 
-	let regions = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap();
+	let region = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap()[0].clone();
 
-	let mut engine = Engine::new(regions, 1.0, 16);
-
-	engine.regions[0].set_sample_data(sample.clone());
+	let mut engine = Engine::new(vec![(region.clone(), sample.clone())], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 
@@ -2128,7 +2082,7 @@ mod tests {
 	assert!(f32_eq(out_left[0], 0.0));
 	assert!(f32_eq(out_right[0], 0.0));
 
-	engine.regions[0].set_sample_data(sample.clone());
+	let mut engine = Engine::new(vec![(region.clone(), sample.clone())], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
@@ -2156,7 +2110,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 	//rd.set_pitch_keytrack(0.0);
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2170,7 +2124,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(0.0).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2184,7 +2138,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(-100.0).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2199,7 +2153,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(1200.0).unwrap();
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2216,7 +2170,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.tune = 1.0;
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2224,7 +2178,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.tune = -1.0;
 
-	let mut region = Region::new(rd, 1.0, 2);
+	let mut region = Region::new(rd, Vec::new(), 1.0, 2);
 
 	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
 	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
@@ -2233,7 +2187,7 @@ mod tests {
     #[test]
     fn trigger_rand() {
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2241,7 +2195,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2249,7 +2203,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2257,7 +2211,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2265,12 +2219,12 @@ mod tests {
 	assert!(engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 	assert!(!engine.regions[0].is_active() && !engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap(), 1.0, 1);
+	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(engine.regions[0].is_active() ^ engine.regions[1].is_active());
     }
@@ -2278,11 +2232,6 @@ mod tests {
 
     #[test]
     fn note_on_off_multiple_regions_key() {
-	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
-	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
-	let sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
-	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
-
 	let region_text = "
 <region> lokey=a3 hikey=a3 pitch_keycenter=57
 <region> lokey=60 hikey=60 pitch_keycenter=60
@@ -2291,177 +2240,118 @@ mod tests {
 ".to_string();
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions, 1.0, 1);
+	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 
-	engine.regions[0].set_sample_data(sample1.clone());
-	engine.regions[1].set_sample_data(sample2.clone());
-	engine.regions[2].set_sample_data(sample3.clone());
-	engine.regions[3].set_sample_data(sample4.clone());
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	for _ in 0..2 {
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
 
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 0.0));
-	    assert!(f32_eq(out_right[0], 0.0));
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert!(engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
 
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
+	assert!(!engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
 
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
+	assert!(!engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 1e1));
-	    assert!(f32_eq(out_right[0], 1e2));
+	// no effect because sustaining
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
+	assert!(!engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], -7e3));
-	    assert!(f32_eq(out_right[0], -7e4));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], -1e5));
-	    assert!(f32_eq(out_right[0], -1e6));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], -2e-1));
-	    assert!(f32_eq(out_right[0], -2e-2));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 6e-3));
-	    assert!(f32_eq(out_right[0], 6e-4));
-
-	    // no effect because sustaining
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 6e-5));
-	    assert!(f32_eq(out_right[0], 6e-6));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 0.0));
-	    assert!(f32_eq(out_right[0], 0.0));
-	}
     }
 
     #[test]
     fn note_on_off_multiple_regions_vel() {
-	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
-	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
-	let sample3 = vec![                         4e5,  4e6,  4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
-	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
-
 	let region_text = "
 <region> lovel=30 hivel=30 amp_veltrack=0
 <region> lovel=50 hivel=50 amp_veltrack=0
 <region> lovel=40 hivel=50 amp_veltrack=0
 <region> lovel=50 hivel=60 amp_veltrack=0
 ".to_string();
+
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions, 1.0, 1);
+	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(20).unwrap()));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	engine.regions[0].set_sample_data(sample1.clone());
-	engine.regions[1].set_sample_data(sample2.clone());
-	engine.regions[2].set_sample_data(sample3.clone());
-	engine.regions[3].set_sample_data(sample4.clone());
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(30).unwrap()));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	for _ in 0..2 {
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(20).unwrap()));
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(55).unwrap()));
+	assert!(engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
 
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(50).unwrap()));
+	assert!(engine.regions[0].is_active());
+	assert!(engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(engine.regions[3].is_active());
 
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 0.0));
-	    assert!(f32_eq(out_right[0], 0.0));
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(30).unwrap()));
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(45).unwrap()));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
+	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
+	assert!(!engine.regions[0].is_active());
+	assert!(!engine.regions[1].is_active());
+	assert!(!engine.regions[2].is_active());
+	assert!(!engine.regions[3].is_active());
 
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 1e1));
-	    assert!(f32_eq(out_right[0], 1e2));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(55).unwrap()));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], -7e3));
-	    assert!(f32_eq(out_right[0], -7e4));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(50).unwrap()));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], -1e5));
-	    assert!(f32_eq(out_right[0], -1e6));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
-	    engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(45).unwrap()));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 4e5));
-	    assert!(f32_eq(out_right[0], 4e6));
-
-	    engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
-
-	    let mut out_left: [f32; 1] = [0.0];
-	    let mut out_right: [f32; 1] = [0.0];
-
-	    engine.process(&mut out_left, &mut out_right);
-	    assert!(f32_eq(out_left[0], 0.0));
-	    assert!(f32_eq(out_right[0], 0.0));
-	}
     }
+
 
     #[test]
     fn region_group() {
-	let sample1 = vec![ 1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e-1,  1e-2,  1e-3,  1e-4,  1e-5 , 1e-6];
-	let sample2 = vec![                         2e5,  2e6,  2e-1,  2e-2,  2e-3,  2e-4,  2e-5 , 2e-6];
-	let sample3 = vec![                                     4e-1,  4e-2,  4e-3,  4e-4,  4e-5 , 4e-6];
-	let sample4 = vec![            -8e3, -8e4, -8e5, -8e6, -8e-1, -8e-2, -8e-3, -8e-4, -8e-5 ,-8e-6];
-	let sample5 = vec![                                                   17e-3,  17e-4,  17e-5 , 17e-6];
-
 	let region_text = "
 <region> key=a3
 <region> key=b3 group=1
@@ -2469,15 +2359,10 @@ mod tests {
 <region> key=d4 off_by=2
 <region> key=e4 group=1
 ".to_string();
+
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions, 1.0, 1);
-
-	engine.regions[0].set_sample_data(sample1.clone());
-	engine.regions[1].set_sample_data(sample2.clone());
-	engine.regions[2].set_sample_data(sample3.clone());
-	engine.regions[3].set_sample_data(sample4.clone());
-	engine.regions[4].set_sample_data(sample5.clone());
+	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 	assert!(engine.regions[0].is_active());
@@ -2514,5 +2399,4 @@ mod tests {
 	assert!(!engine.regions[3].is_active());
 	assert!(engine.regions[4].is_active());
     }
-
 }

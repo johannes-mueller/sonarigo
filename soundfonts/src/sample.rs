@@ -1,11 +1,9 @@
-use std::f64::consts::PI;
 
 pub struct Sample {
     sample_data: Vec<f32>,
 
     position: Option<usize>,
     real_sample_length: usize,
-    max_block_length: usize,
 
     native_frequency: f64,
 }
@@ -23,7 +21,6 @@ impl Sample {
 
 	    position: None,
 	    real_sample_length: frames,
-	    max_block_length: max_block_length,
 
 	    native_frequency: native_frequency
 	}
@@ -37,14 +34,9 @@ impl Sample {
 	self.position = Some(0);
     }
 
-    pub fn note_off(&mut self) {
-	self.position = None;
-    }
-
     pub fn iter(&mut self, frequency: f64) -> SampleIterator {
 	let pos = self.position.unwrap();
 	let ratio = frequency / self.native_frequency;
-//	println!("ratio {}", ratio);
 	SampleIterator {
 	    sample: self,
 	    pos: pos,
@@ -71,7 +63,7 @@ pub struct SampleIterator<'a> {
 
 fn cubic(sample_data: &[f32], pos: usize, remainder: f32) -> f32 {
     let len = sample_data.len();
-//    println!("pos {} {} {} {}", ((pos + len) - 2) % len, pos, pos+2, pos+4);
+
     let p0 = sample_data[((pos + len) - 2) % len];
     let p1 = sample_data[pos];
     let p2 = sample_data[pos+2];
@@ -81,10 +73,7 @@ fn cubic(sample_data: &[f32], pos: usize, remainder: f32) -> f32 {
     let b = 1.0f32 - a;
     let c = a * b;
 
-    let r = (1.0f32  + 1.5f32 * c) * (p1 * b + p2 * a) - 0.5f32 * c * (p0 * b + p1 + p2 + p3 * a);
-
-//    println!("res {} {} {} {} : {} -> {}", p0, p1, p2, p3, remainder, r);
-    r
+    (1.0f32  + 1.5f32 * c) * (p1 * b + p2 * a) - 0.5f32 * c * (p0 * b + p1 + p2 + p3 * a)
 }
 
 
@@ -98,8 +87,6 @@ impl<'a> Iterator for SampleIterator<'a> {
 	let interpos = (self.pos as f32) * self.freq_ratio;
 	let remainder = interpos - interpos.floor();
 	let new_pos = interpos as usize;
-
-//	println!("{}: {} {} -> {} {} {}", self.pos, interpos, remainder, new_pos, 2*new_pos, 2*new_pos+1);
 
 	let left = cubic(&self.sample.sample_data, 2*new_pos, remainder);
 	let right = cubic(&self.sample.sample_data, 2*new_pos+1, remainder);
@@ -121,6 +108,7 @@ mod tests {
 
     use super::*;
 
+    use std::f64::consts::PI;
 
     #[test]
     fn test_iterator() {

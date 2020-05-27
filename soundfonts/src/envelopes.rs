@@ -78,7 +78,7 @@ impl Generator {
 	env
     }
 
-    fn sustain_envelope(&self, samplerate: f32, nsamples: usize) -> Vec<f32> {
+    fn sustain_envelope(&self, nsamples: usize) -> Vec<f32> {
 	let mut sustain = Vec::new();
 	sustain.resize(nsamples, self.sustain);
 	sustain
@@ -122,7 +122,7 @@ impl ADSREnvelope {
     pub(crate) fn new(generator: &Generator, samplerate: f32, max_block_length: usize) -> Self {
 	ADSREnvelope {
 	    attack_decay_envelope: generator.ads_envelope(samplerate, max_block_length),
-	    sustain_envelope: generator.sustain_envelope(samplerate, max_block_length),
+	    sustain_envelope: generator.sustain_envelope(max_block_length),
 	    release_envelope: generator.release_envelope(samplerate, max_block_length),
 
 	    max_block_length: max_block_length,
@@ -195,7 +195,7 @@ mod tests {
 	let eg = Generator::default();
 
 	assert_eq!(eg.ads_envelope(1.0, 8).as_slice(), [1.0; 16]);
-	assert_eq!(eg.sustain_envelope(1.0, 8).as_slice(), [1.0; 8]);
+	assert_eq!(eg.sustain_envelope(8).as_slice(), [1.0; 8]);
 	assert_eq!(eg.release_envelope(1.0, 8).as_slice(), [0.0; 16]);
     }
 
