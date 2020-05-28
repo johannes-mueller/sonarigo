@@ -2,8 +2,9 @@
 pub struct Sample {
     sample_data: Vec<f32>,
 
-    position: Option<usize>,
-    real_sample_length: usize,
+    position: Option<f64>,
+    real_sample_length: f64,
+    max_block_length: usize,
 
     native_frequency: f64,
 }
@@ -20,7 +21,8 @@ impl Sample {
 	    sample_data: sample_data,
 
 	    position: None,
-	    real_sample_length: frames,
+	    real_sample_length: frames as f64,
+	    max_block_length: max_block_length,
 
 	    native_frequency: native_frequency
 	}
@@ -31,21 +33,19 @@ impl Sample {
     }
 
     pub fn note_on(&mut self) {
-	self.position = Some(0);
+	self.position = Some(0.0);
     }
 
     pub fn iter(&mut self, frequency: f64) -> SampleIterator {
 	let pos = self.position.unwrap();
 	let ratio = frequency / self.native_frequency;
-	SampleIterator {
-	    sample: self,
-	    pos: pos,
-
-	    freq_ratio: ratio as f32
+	if pos + self.max_block_length as f64 * ratio >= (self.sample_data.len() / 2) as f64 {
+	    self.sample_data.resize(self.sample_data.len() + 2 * self.max_block_length, 0.0)
 	}
+	SampleIterator::new(self, pos, ratio)
     }
 
-    fn update(&mut self, new_pos: usize) {
+    fn update(&mut self, new_pos: f64) {
 	self.position = if new_pos < self.real_sample_length {
 	    Some(new_pos)
 	} else {
@@ -56,24 +56,34 @@ impl Sample {
 
 pub struct SampleIterator<'a> {
     sample: &'a mut Sample,
-    pos: usize,
+    pos: f64,
 
-    freq_ratio: f32
+    freq_ratio: f64
 }
 
-fn cubic(sample_data: &[f32], pos: usize, remainder: f32) -> f32 {
+impl<'a> SampleIterator<'a> {
+    fn new(sample: &'a mut Sample, pos: f64, freq_ratio: f64) -> Self {
+	SampleIterator {
+	    sample: sample,
+	    pos: pos,
+	    freq_ratio: freq_ratio
+	}
+    }
+}
+
+fn cubic(sample_data: &[f32], pos: usize, remainder: f64) -> f32 {
     let len = sample_data.len();
 
-    let p0 = sample_data[((pos + len) - 2) % len];
-    let p1 = sample_data[pos];
-    let p2 = sample_data[pos+2];
-    let p3 = sample_data[pos+4];
+    let p0 = sample_data[((pos + len) - 2) % len] as f64;
+    let p1 = sample_data[pos] as f64;
+    let p2 = sample_data[pos+2] as f64;
+    let p3 = sample_data[pos+4] as f64;
 
     let a = remainder;
-    let b = 1.0f32 - a;
+    let b = 1.0 - a;
     let c = a * b;
 
-    (1.0f32  + 1.5f32 * c) * (p1 * b + p2 * a) - 0.5f32 * c * (p0 * b + p1 + p2 + p3 * a)
+    ((1.0  + 1.5 * c) * (p1 * b + p2 * a) - 0.5 * c * (p0 * b + p1 + p2 + p3 * a)) as f32
 }
 
 
@@ -81,17 +91,16 @@ fn cubic(sample_data: &[f32], pos: usize, remainder: f32) -> f32 {
 impl<'a> Iterator for SampleIterator<'a> {
     type Item = (f32, f32);
 
-
     fn next(&mut self) -> Option<Self::Item> {
+	let (remainder, sample_pos) = {
+	    let sample_pos = self.pos.floor();
+	    ((self.pos - sample_pos), sample_pos as usize)
+	};
 
-	let interpos = (self.pos as f32) * self.freq_ratio;
-	let remainder = interpos - interpos.floor();
-	let new_pos = interpos as usize;
+	let left = cubic(&self.sample.sample_data, 2*sample_pos, remainder);
+	let right = cubic(&self.sample.sample_data, 2*sample_pos+1, remainder);
 
-	let left = cubic(&self.sample.sample_data, 2*new_pos, remainder);
-	let right = cubic(&self.sample.sample_data, 2*new_pos+1, remainder);
-
-	self.pos += 1;
+	self.pos += self.freq_ratio;
 
 	Some((left, right))
     }
@@ -99,7 +108,7 @@ impl<'a> Iterator for SampleIterator<'a> {
 
 impl<'a> Drop for SampleIterator<'a> {
     fn drop(&mut self) {
-	self.sample.update(self.pos)
+	self.sample.update(self.pos);
     }
 }
 
@@ -129,9 +138,7 @@ mod tests {
 	assert_eq!(it.next(), Some((3.0, -3.0)));
 	assert_eq!(it.next(), Some((4.0, -4.0)));
 	assert_eq!(it.next(), Some((0.0, 0.0)));
-
     }
-
 
 
     #[test]
@@ -160,7 +167,7 @@ mod tests {
 	let mut last_l = 0.0;
 	let mut last_r = 0.0;
 
-	let length = sample.real_sample_length/2;
+	let length = sample.real_sample_length/2.0;
 
 	for (sl, sr) in sample.iter(test_freq) {
 	    if sl * last_l < 0.0 {
@@ -174,18 +181,50 @@ mod tests {
 	    last_r = sl;
 
 	    i += 1;
-	    if i >= length {
+	    if i as f64 >= length {
 		break;
 	    }
 	}
 
-	let to_freq = samplerate/((sample.real_sample_length/2) as f64);
+	let to_freq = samplerate/((sample.real_sample_length/2.0) as f64);
 
 	if  halfw_l * to_freq > test_freq || (halfw_l + 1.0) * to_freq < test_freq {
 	    panic!("left frequency does not match {} {} {}", halfw_l * to_freq, (halfw_l + 1.0) * to_freq, test_freq)
 	}
 	if  halfw_r * to_freq > test_freq || (halfw_r + 1.0) * to_freq < test_freq {
 	    panic!("left frequency does not match {} {} {}", halfw_r * to_freq, (halfw_r + 1.0) * to_freq, test_freq)
+	}
+    }
+
+    #[test]
+    fn test_pitch_up_at_start() {
+	let mut sample = make_test_sample(36000, 48000.0, 440.0);
+	sample.note_on();
+
+	while sample.is_playing() {
+	    let mut it = sample.iter(880.0);
+	    for _i in 0..4096 {
+		it.next();
+	    }
+	}
+    }
+
+    #[test]
+    fn test_pitch_up_late() {
+	let mut sample = make_test_sample(36000, 48000.0, 440.0);
+	sample.note_on();
+
+	let pitch_freq = 440.0;
+	while let Some(pos) = sample.position {
+	    let freq = if pos < 30000.0 {
+		pitch_freq
+	    } else {
+		2.0 * pitch_freq
+	    };
+	    let mut it = sample.iter(freq);
+	    for _i in 0..4096 {
+		it.next();
+	    }
 	}
     }
 
