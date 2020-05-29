@@ -1,0 +1,19 @@
+[package]
+name = "sonarigo-jack"
+version = "0.1.0"
+authors = ["Johannes Mueller <github@johannes-mueller.org>"]
+edition = "2018"
+
+license = "GPLv2"
+
+description = "A soundfont sampler, mainly aimed as LV2 plugin"
+keywords = ["jack", "sampler", "MIDI", "instrument"]
+
+repository = "https://github.com/johannes-mueller/sonarigo"
+
+readme = "../README.md"
+
+[dependencies]
+jack = "0.6"
+wmidi = "3.1.0"
+soundfonts = { path = "../soundfonts" }
