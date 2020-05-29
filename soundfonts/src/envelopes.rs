@@ -2,6 +2,7 @@ use log::error;
 
 use crate::errors::*;
 
+use super::utils;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Generator {
@@ -102,11 +103,20 @@ impl Generator {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum State {
+pub enum State {
     AttackDecay(usize),
     Sustain,
     Release(usize),
     Inactive
+}
+
+impl State {
+    pub fn is_active(&self) -> bool {
+	match *self {
+	    State::Inactive => false,
+	    _ => true
+	}
+    }
 }
 
 pub struct ADSREnvelope {
@@ -130,8 +140,8 @@ impl ADSREnvelope {
 	}
     }
 
-    pub(crate) fn active_envelope(&mut self) -> (&Vec<f32>, usize) {
-	match self.state {
+    pub(crate) fn active_envelope(&self, state: State) -> (&Vec<f32>, usize) {
+	match state {
 	    State::AttackDecay(pos) => (&self.attack_decay_envelope, pos),
 	    State::Release(pos) => (&self.release_envelope, pos),
 	    State::Sustain => (&self.sustain_envelope, 0),
@@ -142,16 +152,8 @@ impl ADSREnvelope {
 	}
     }
 
-    pub(crate) fn note_on(&mut self) {
-	self.state = State::AttackDecay(0);
-    }
-
-    pub(crate) fn note_off(&mut self) {
-	self.state = State::Release(0);
-    }
-
-    pub(crate) fn update(&mut self, new_pos: usize) {
-	self.state = match &self.state {
+    pub(crate) fn update_state(&self, state: &mut State, new_pos: usize) {
+	*state = match &state {
 	    State::AttackDecay(_) => {
 		if new_pos < self.attack_decay_envelope.len() - self.max_block_length {
 		    State::AttackDecay(new_pos)
@@ -160,27 +162,13 @@ impl ADSREnvelope {
 		}
 	    }
 	    State::Release(_) =>  {
-		if new_pos < self.release_envelope.len() - self.max_block_length {
+		if new_pos < self.release_envelope.len() - self.max_block_length && self.release_envelope[new_pos] < utils::dB_to_gain(-160.0) {
 		    State::Release(new_pos)
 		} else {
 		    State::Inactive
 		}
 	    }
-	    s => *s
-	}
-    }
-
-    pub(crate) fn is_playing_or_releasing(&self) -> bool {
-	match self.state {
-	    State::Inactive => false,
-	    _ => true
-	}
-    }
-
-    pub(crate) fn is_playing(&self) -> bool {
-	match self.state {
-	    State::Release(_) | State::Inactive => false,
-	    _ => true
+	    s => **s
 	}
     }
 }
