@@ -374,11 +374,11 @@ mod tests {
 	let frequency = 1.0;
 
 	let mut eg = envelopes::Generator::default();
-	eg.set_attack(2.0);
-	eg.set_hold(3.0);
-	eg.set_decay(4.0);
-	eg.set_sustain(60.0);
-	eg.set_release(5.0);
+	eg.set_attack(2.0).unwrap();
+	eg.set_hold(3.0).unwrap();
+	eg.set_decay(4.0).unwrap();
+	eg.set_sustain(60.0).unwrap();
+	eg.set_release(5.0).unwrap();
 
 	Sample::new(sample, max_block_length, frequency, envelopes::ADSREnvelope::new(&eg, 1.0, max_block_length))
     }
@@ -467,13 +467,21 @@ mod tests {
 
 	sample.note_off(1.0);
 
-	let mut out_left = [0.0; 11];
-	let mut out_right = [0.0; 11];
+	let mut out_left = [0.0; 2];
+	let mut out_right = [0.0; 2];
 
 	sample.process(&mut out_left, &mut out_right);
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(out.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+	assert_eq!(out.as_slice(), [0.1211, 0.0245]);
+
+	let mut out_left = [0.0; 9];
+	let mut out_right = [0.0; 9];
+
+	sample.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(out.as_slice(), [0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -489,13 +497,21 @@ mod tests {
 
 	sample.note_off(1.0);
 
-	let mut out_left = [0.0; 8];
-	let mut out_right = [0.0; 8];
+	let mut out_left = [0.0; 2];
+	let mut out_right = [0.0; 2];
 
 	sample.process(&mut out_left, &mut out_right);
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(out.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
+	assert_eq!(out.as_slice(), [0.1211, 0.0245]);
+
+	let mut out_left = [0.0; 6];
+	let mut out_right = [0.0; 6];
+
+	sample.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(out.as_slice(), [0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -511,13 +527,21 @@ mod tests {
 
 	sample.note_off(1.0);
 
-	let mut out_left = [0.0; 7];
-	let mut out_right = [0.0; 7];
+	let mut out_left = [0.0; 2];
+	let mut out_right = [0.0; 2];
 
 	sample.process(&mut out_left, &mut out_right);
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(out.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0]);
+	assert_eq!(out.as_slice(), [0.1211, 0.0245]);
+
+	let mut out_left = [0.0; 5];
+	let mut out_right = [0.0; 5];
+
+	sample.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(out.as_slice(), [0.0049, 0.0010, 0.0002, 0.0, 0.0]);
     }
 
     #[test]
@@ -533,13 +557,21 @@ mod tests {
 
 	sample.note_off(1.0);
 
-	let mut out_left = [0.0; 7];
-	let mut out_right = [0.0; 7];
+	let mut out_left = [0.0; 2];
+	let mut out_right = [0.0; 2];
 
 	sample.process(&mut out_left, &mut out_right);
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(out.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0]);
+	assert_eq!(out.as_slice(), [0.1211, 0.0245]);
+
+	let mut out_left = [0.0; 5];
+	let mut out_right = [0.0; 5];
+
+	sample.process(&mut out_left, &mut out_right);
+
+	let out: Vec<f32> = out_left.iter().map(|v| (v*10000.0).round()/10000.0).collect();
+	assert_eq!(out.as_slice(), [0.0049, 0.0010, 0.0002, 0.0, 0.0]);
     }
 
 

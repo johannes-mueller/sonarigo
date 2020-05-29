@@ -125,7 +125,6 @@ pub struct ADSREnvelope {
     release_envelope: Vec<f32>,
 
     max_block_length: usize,
-    state: State
 }
 
 impl ADSREnvelope {
@@ -136,7 +135,6 @@ impl ADSREnvelope {
 	    release_envelope: generator.release_envelope(samplerate, max_block_length),
 
 	    max_block_length: max_block_length,
-	    state: State::AttackDecay(0)
 	}
     }
 
@@ -162,7 +160,7 @@ impl ADSREnvelope {
 		}
 	    }
 	    State::Release(_) =>  {
-		if new_pos < self.release_envelope.len() - self.max_block_length && self.release_envelope[new_pos] < utils::dB_to_gain(-160.0) {
+		if new_pos < self.release_envelope.len() - self.max_block_length && self.release_envelope[new_pos] > utils::dB_to_gain(-160.0) {
 		    State::Release(new_pos)
 		} else {
 		    State::Inactive
