@@ -9,7 +9,7 @@ use super::engine;
 use crate::errors::*;
 
 #[derive(Debug)]
-pub(super) enum ParserError {
+pub enum ParserError {
     RangeError(RangeError),
     KeyError(String),
     ParseIntError(ParseIntError),
@@ -46,7 +46,7 @@ impl error::Error for ParserError {
 
 
 #[derive(Debug)]
-pub(super) struct NoteParseError {
+pub struct NoteParseError {
     key: String
 }
 

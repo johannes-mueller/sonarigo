@@ -4,8 +4,8 @@ extern crate log;
 extern crate rand;
 extern crate sndfile;
 
-mod sfz;
-mod engine;
+pub mod sfz;
+pub mod engine;
 mod sample;
 mod envelopes;
 mod errors;

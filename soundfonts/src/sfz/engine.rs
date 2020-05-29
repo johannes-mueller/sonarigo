@@ -1,5 +1,9 @@
 use std::collections::{HashSet, HashMap};
 use std::convert::TryFrom;
+use std::path::Path;
+use std::fmt;
+use std::error;
+use std::io;
 
 use itertools::izip;
 
@@ -8,6 +12,10 @@ use crate::engine;
 use crate::sample;
 use crate::envelopes;
 use crate::utils;
+use crate::sndfile;
+use crate::sndfile::SndFileIO;
+
+use super::parser;
 
 #[derive(Clone, Copy)]
 pub(super) struct VelRange {
@@ -438,8 +446,6 @@ impl Region {
 
 	self.gain = utils::dB_to_gain(self.params.volume + velocity_db * self.params.amp_veltrack.abs() + rt_decay);
 
-
-
 	let native_freq = self.params.pitch_keycenter.to_freq_f64();
 
 	self.current_note_frequency = native_freq * (note.to_freq_f64()/native_freq).powf(self.params.pitch_keytrack) * 2.0f64.powf(1.0/12.0 * self.params.tune);
@@ -575,13 +581,65 @@ impl Region {
     }
 }
 
+#[derive(Debug)]
+pub enum EngineError {
+    ParserError(parser::ParserError),
+    SndFileError(sndfile::SndFileError),
+    IOError(io::Error),
+    UnspecifiedSndFileError(String)
+
+}
+
+impl fmt::Display for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	match &*self {
+	    EngineError::ParserError(pe) => std::fmt::Display::fmt(&pe, f),
+	    EngineError::SndFileError(sfe) => fmt::Debug::fmt(&sfe, f),
+	    EngineError::IOError(ioe) => fmt::Display::fmt(&ioe, f),
+	    EngineError::UnspecifiedSndFileError(sf) => write!(f, "Unspecified error from sndfile while reading {}", sf)
+	}
+    }
+}
+
+impl error::Error for EngineError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+	match *self {
+	    EngineError::ParserError(ref e) => Some(e),
+	    EngineError::SndFileError(_) => None, // SndFileError should implement std::errer::Error
+	    EngineError::IOError(ref e) => Some(e),
+	    _ => None
+	}
+    }
+}
+
 
 pub struct Engine {
     pub(super) regions: Vec<Region>,
 }
 
 impl Engine {
-    fn new(reg_data_sample: Vec<(RegionData, Vec<f32>)>, samplerate: f64, max_block_length: usize) -> Engine {
+    pub fn new(sfz_file: String, samplerate: f64, max_block_length: usize) -> Result<Engine, EngineError> {
+	let mut fh = std::fs::File::open(&sfz_file).map_err(|e| EngineError::IOError(e))?;
+	let mut sfz_text = String::new();
+	io::Read::read_to_string(&mut fh, &mut sfz_text).map_err(|e| EngineError::IOError(e))?;
+
+	let region_data = parser::parse_sfz_text(sfz_text).map_err(|pe| EngineError::ParserError(pe))?;
+
+	let sample_path = Path::new(&sfz_file).parent().unwrap();
+
+	let regions: Result<Vec<(RegionData, Vec<f32>)>, _> = region_data.iter().map( |rd| {
+	    let sample_file = rd.sample.replace("\\", &std::path::MAIN_SEPARATOR.to_string());
+	    println!("{}", sample_file);
+	    let mut snd = sndfile::OpenOptions::ReadOnly(sndfile::ReadOptions::Auto).from_path(sample_path.join(&sample_file))
+		.map_err(|sfe| EngineError::SndFileError(sfe))?;
+	    let sample = snd.read_all_to_vec().map_err(|_| EngineError::UnspecifiedSndFileError(sample_file))?;
+	    Ok((rd.clone(), sample))
+	}).collect();
+	println!("loaded");
+	regions.map(|data| Self::from_region_array(data, samplerate, max_block_length))
+    }
+
+    fn from_region_array(reg_data_sample: Vec<(RegionData, Vec<f32>)>, samplerate: f64, max_block_length: usize) -> Engine {
 	Engine {
 	    regions: reg_data_sample.iter().map(|(rd, sample)| Region::new(rd.clone(), sample.to_vec(), samplerate, max_block_length)).collect(),
 	}
@@ -602,7 +660,7 @@ impl engine::EngineTrait for Engine {
 	}
 	for group in activated_groups {
 	    for r in &mut self.regions {
-		    r.group_activated(group);
+		r.group_activated(group);
 	    }
 	}
     }
@@ -624,6 +682,9 @@ mod tests {
     use super::*;
     use super::super::parser::parse_sfz_text;
     use crate::engine::EngineTrait;
+
+    use crate::sndfile;
+    use crate::sndfile::SndFileIO;
 
     fn f32_eq(a: f32, b: f32) -> bool {
 	if (a - b).abs() > f32::EPSILON {
@@ -1459,7 +1520,7 @@ mod tests {
 
     #[test]
     fn engine_process_silence() {
-	let mut engine = Engine::new(vec![(RegionData::default(), Vec::new()), (RegionData::default(), Vec::new())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), Vec::new()), (RegionData::default(), Vec::new())], 1.0, 16);
 
 	let mut out_left: [f32; 4] = [1.0; 4];
 	let mut out_right: [f32; 4] = [1.0; 4];
@@ -1480,7 +1541,7 @@ mod tests {
 			   -0.5, -0.5,
 			   0.0, 0.5];
 
-	let mut engine = Engine::new(vec![(RegionData::default(), sample1), (RegionData::default(), sample2)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample1), (RegionData::default(), sample2)], 1.0, 16);
 
 	engine.regions[0].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 	engine.regions[1].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
@@ -1925,7 +1986,7 @@ mod tests {
 			  0.4, -0.4,
 			  0.5, -0.5];
 
-	let mut engine = Engine::new(vec![(RegionData::default(), sample)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample)], 1.0, 16);
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -1962,7 +2023,7 @@ mod tests {
 	sample.resize(48, 1.0);
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut engine = Engine::new(vec![(regions[0].clone(), sample)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(regions[0].clone(), sample)], 1.0, 16);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -2071,7 +2132,7 @@ mod tests {
 
 	let region = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap()[0].clone();
 
-	let mut engine = Engine::new(vec![(region.clone(), sample.clone())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone())], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 
@@ -2082,7 +2143,7 @@ mod tests {
 	assert!(f32_eq(out_left[0], 0.0));
 	assert!(f32_eq(out_right[0], 0.0));
 
-	let mut engine = Engine::new(vec![(region.clone(), sample.clone())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone())], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
@@ -2187,7 +2248,7 @@ mod tests {
     #[test]
     fn trigger_rand() {
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2195,7 +2256,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2203,7 +2264,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2211,7 +2272,7 @@ mod tests {
 	assert!(!engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2219,12 +2280,12 @@ mod tests {
 	assert!(engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 	assert!(!engine.regions[0].is_active() && !engine.regions[1].is_active());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::new(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(engine.regions[0].is_active() ^ engine.regions[1].is_active());
     }
@@ -2240,7 +2301,7 @@ mod tests {
 ".to_string();
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
 	assert!(!engine.regions[0].is_active());
@@ -2304,7 +2365,7 @@ mod tests {
 
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(20).unwrap()));
 	assert!(!engine.regions[0].is_active());
 	assert!(!engine.regions[1].is_active());
@@ -2362,7 +2423,7 @@ mod tests {
 
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::new(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 	assert!(engine.regions[0].is_active());
@@ -2398,5 +2459,38 @@ mod tests {
 	assert!(engine.regions[2].is_active());
 	assert!(!engine.regions[3].is_active());
 	assert!(engine.regions[4].is_active());
+    }
+
+    #[test]
+    fn test_real_sample() {
+	let mut snd = sndfile::OpenOptions::ReadOnly(sndfile::ReadOptions::Auto).from_path("assets/gmidi-grand-piano-C4.flac").unwrap();
+	let sample = snd.read_all_to_vec().unwrap();
+
+	let mut reference = [vec![0.0f32; 2048], sample.clone()].concat();
+	reference.resize(2 * 30 * 48000 + 1024, 0.0f32);
+
+	let mut out_left = Vec::new();
+	out_left.resize(30 * 48000 + 1024, 0.0);
+	let mut out_right = Vec::new();
+	out_right.resize(30 * 48000 + 1024, 0.0);
+
+	let goal = (30 * 48000) / 1024;
+
+	let mut engine = Engine::new("assets/simple-test-instrument.sfz".to_string(), 48000.0, 1024).unwrap();
+
+	engine.process(&mut out_left, &mut out_right);
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	for i in 1..goal {
+	    engine.process(&mut out_left[i*1024..(i+1)*1024], &mut out_right[i*1024..(i+1)*1024]);
+	}
+
+	let mut result = Vec::with_capacity(reference.len());
+	for (l, r) in Iterator::zip(out_left.iter(), out_right.iter()) {
+	    result.push(l);
+	    result.push(r);
+	}
+
+	assert!(!Iterator::zip(reference.iter(), result.iter()).any( |(a, b)| a != *b ));
     }
 }
