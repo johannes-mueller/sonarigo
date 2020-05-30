@@ -2013,6 +2013,20 @@ mod tests {
     }
 
     #[test]
+    fn note_on_off_during_release() {
+	let rd = RegionData::default();
+	let mut region = make_dummy_region(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+
+	pull_samples(&mut region, 2);
+	assert!(!region.is_playing_note(wmidi::Note::C3));
+    }
+
+    #[test]
     fn note_on_off_detuned() {
 	let mut rd = RegionData::default();
 	rd.tune = 1.0;

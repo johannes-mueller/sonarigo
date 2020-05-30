@@ -80,10 +80,9 @@ impl Sample {
 
     pub fn note_off(&mut self, note: wmidi::Note) {
 	for voice in &mut self.voices {
-	    if voice.note == note {
+	    if voice.note == note && !voice.envelope_state.is_releasing() {
 		voice.envelope_state = envelopes::State::Release(0);
 		voice.release_start_gain = voice.last_envelope_gain;
-		break;
 	    }
 	}
     }
