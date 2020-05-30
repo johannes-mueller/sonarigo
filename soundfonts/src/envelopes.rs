@@ -117,6 +117,14 @@ impl State {
 	    _ => true
 	}
     }
+
+    pub fn is_releasing(&self) -> bool {
+	match *self {
+	    State::Inactive |
+	    State::Release(_) => true,
+	    _ => false
+	}
+    }
 }
 
 pub struct ADSREnvelope {

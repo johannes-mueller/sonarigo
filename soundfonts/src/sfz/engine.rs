@@ -5,8 +5,6 @@ use std::fmt;
 use std::error;
 use std::io;
 
-use itertools::izip;
-
 use crate::errors::*;
 use crate::engine;
 use crate::sample;
@@ -356,8 +354,6 @@ pub(super) struct Region {
 
     samplerate: f64,
 
-    current_note_frequency: f64,
-
     last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     notes_for_release_trigger: HashSet<wmidi::Note>,
 
@@ -383,8 +379,6 @@ impl Region {
 	    gain: 1.0,
 
 	    samplerate: samplerate,
-
-	    current_note_frequency: 0.0,
 
 	    last_note_on: None,
 	    notes_for_release_trigger: HashSet::new(),
@@ -420,7 +414,7 @@ impl Region {
     }
 
     fn is_playing_note(&self, note: wmidi::Note) -> bool {
-	self.sample.is_playing_note(note.to_freq_f64())
+	self.sample.is_playing_note(note)
     }
 
     fn note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
@@ -449,14 +443,14 @@ impl Region {
 
 	let native_freq = self.params.pitch_keycenter.to_freq_f64();
 
-	self.current_note_frequency = native_freq * (note.to_freq_f64()/native_freq).powf(self.params.pitch_keytrack) * 2.0f64.powf(1.0/12.0 * self.params.tune);
+	let current_note_frequency = native_freq * (note.to_freq_f64()/native_freq).powf(self.params.pitch_keytrack) * 2.0f64.powf(1.0/12.0 * self.params.tune);
 
 	self.time_since_note_on = 0.0;
-	self.sample.note_on(self.current_note_frequency, self.gain);
+	self.sample.note_on(note, current_note_frequency, self.gain);
     }
 
     fn note_off(&mut self, note: wmidi::Note) {
-	self.sample.note_off(note.to_freq_f64());
+	self.sample.note_off(note);
     }
 
     fn sustain_pedal(&mut self, pushed: bool) {
@@ -476,7 +470,7 @@ impl Region {
     }
 
     fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) -> bool {
-	if self.is_playing_note(note) {
+	if self.is_playing_note(note) && !self.sample.is_releasing_note(note) {
 	    return false;
 	}
 
@@ -691,14 +685,8 @@ mod tests {
     use crate::sndfile;
     use crate::sndfile::SndFileIO;
 
-    fn f32_eq(a: f32, b: f32) -> bool {
-	if (a - b).abs() > f32::EPSILON {
-	    println!("float equivalence check failed, a: {}, b: {}", a, b);
-	    false
-	} else {
-	    true
-	}
-    }
+    use crate::sample::tests as sampletests;
+    use crate::sample::tests::f32_eq;
 
     #[test]
     fn region_data_default() {
@@ -1738,8 +1726,6 @@ mod tests {
 	region.process(&mut out_left, &mut out_right);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	assert_eq!(region.gain, utils::dB_to_gain(-6.0));
-
-
     }
 
     #[test]
@@ -2013,6 +1999,32 @@ mod tests {
 	assert!(!region.sample.is_playing());
     }
 
+    #[test]
+    fn note_on_during_release() {
+	let rd = RegionData::default();
+	let mut region = make_dummy_region(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+
+	pull_samples(&mut region, 2);
+	assert!(region.is_playing_note(wmidi::Note::C3));
+    }
+
+    #[test]
+    fn note_on_off_detuned() {
+	let mut rd = RegionData::default();
+	rd.tune = 1.0;
+	let mut region = make_dummy_region(rd, 1.0, 2);
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	assert!(region.is_playing_note(wmidi::Note::C3));
+
+	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
+	pull_samples(&mut region, 2);
+	assert!(!region.is_playing_note(wmidi::Note::C3));
+    }
 
     #[test]
     fn note_remain_sustain_pedal() {
@@ -2276,82 +2288,137 @@ mod tests {
 
     #[test]
     fn pitch_keytrack_frequency() {
+	let samplerate = 48000.0;
+	let nsamples = 96000;
+
 	let mut rd = RegionData::default();
 	rd.pitch_keycenter = wmidi::Note::A3;
-	//rd.set_pitch_keytrack(0.0);
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
 
-	region.note_off(wmidi::Note::A3);
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
+	sampletests::assert_frequency(region.sample, samplerate, 880.0);
+
 
 	let mut rd = RegionData::default();
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(0.0).unwrap();
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
 
-	region.note_off(wmidi::Note::A4);
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(0.0).unwrap();
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
+
 
 	let mut rd = RegionData::default();
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(-100.0).unwrap();
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
 
-	region.note_off(wmidi::Note::A4);
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(-100.0).unwrap();
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 220.0));
+	sampletests::assert_frequency(region.sample, samplerate, 220.0);
 
 
 	let mut rd = RegionData::default();
 	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.set_pitch_keytrack(1200.0).unwrap();
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
 
-	region.note_off(wmidi::Note::A4);
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.set_pitch_keytrack(1200.0).unwrap();
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 880.0));
-
+	sampletests::assert_frequency(region.sample, samplerate, 880.0);
     }
 
     #[test]
     fn tune_frequency() {
+	let samplerate = 48000.0;
+	let nsamples = 96000;
+
 	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
+
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.tune = 1.0;
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
+
 
 	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
 	rd.tune = -1.0;
 
-	let mut region = make_dummy_region(rd, 1.0, 2);
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
-	assert!(f32_eq(region.current_note_frequency as f32, 440.0));
+	sampletests::assert_frequency(region.sample, samplerate, 440.0);
+
+
+	let mut rd = RegionData::default();
+	rd.pitch_keycenter = wmidi::Note::A3;
+	rd.tune = 1.0;
+
+	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
+	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+
+	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
+	sampletests::assert_frequency(region.sample, samplerate, 466.16);
     }
 
     #[test]

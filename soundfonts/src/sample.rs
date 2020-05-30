@@ -1,8 +1,10 @@
+use wmidi;
 
 use super::envelopes;
 
 struct Voice {
     position: f64,
+    note: wmidi::Note,
     frequency: f64,
     gain: f32,
 
@@ -12,9 +14,10 @@ struct Voice {
 }
 
 impl Voice {
-    fn new(frequency: f64, gain: f32) -> Voice {
+    fn new(note: wmidi::Note, frequency: f64, gain: f32) -> Voice {
 	Voice {
 	    frequency: frequency,
+	    note: note,
 	    gain: gain,
 	    position: 0.0,
 
@@ -63,19 +66,24 @@ impl Sample {
 	!self.voices.is_empty()
     }
 
-    pub fn is_playing_note(&self, frequency: f64) -> bool {
-	self.voices.iter().any(|v| v.frequency == frequency)
+    pub fn is_playing_note(&self, note: wmidi::Note) -> bool {
+	self.voices.iter().any(|v| v.note == note)
     }
 
-    pub fn note_on(&mut self, frequency: f64, gain: f32) {
-	self.voices.push(Voice::new(frequency, gain))
+    pub fn is_releasing_note(&self, note: wmidi::Note) -> bool {
+	!self.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
     }
 
-    pub fn note_off(&mut self, frequency: f64) {
+    pub fn note_on(&mut self, note: wmidi::Note, frequency: f64, gain: f32) {
+	self.voices.push(Voice::new(note, frequency, gain))
+    }
+
+    pub fn note_off(&mut self, note: wmidi::Note) {
 	for voice in &mut self.voices {
-	    if (voice.frequency - frequency).abs() < std::f64::EPSILON * frequency {
+	    if voice.note == note {
 		voice.envelope_state = envelopes::State::Release(0);
 		voice.release_start_gain = voice.last_envelope_gain;
+		break;
 	    }
 	}
     }
@@ -90,8 +98,9 @@ impl Sample {
     pub fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
 	for voice in &mut self.voices {
 	    let ratio = voice.frequency / self.native_frequency;
-	    if voice.position + self.max_block_length as f64 * ratio >= (self.sample_data.len() / 2) as f64 {
-		self.sample_data.resize(self.sample_data.len() + 2 * self.max_block_length, 0.0)
+	    let needed_sample_length = (voice.position + self.max_block_length as f64 * ratio).ceil() as usize + 5;
+	    if  needed_sample_length * 2 >= self.sample_data.len() {
+		self.sample_data.resize(needed_sample_length * 2, 0.0)
 	    }
 
 	    let (envelope, mut env_position) = self.envelope.active_envelope(voice.envelope_state);
@@ -131,14 +140,16 @@ fn cubic(sample_data: &[f32], pos: usize, remainder: f64) -> f32 {
 
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     use super::*;
 
     use std::f64::consts::PI;
     use std::f32::consts::SQRT_2;
+    use std::convert::TryFrom;
+    use wmidi;
 
-    fn f32_eq(a: f32, b: f32) -> bool {
+    pub(crate) fn f32_eq(a: f32, b: f32) -> bool {
 	if (a - b).abs() > f32::EPSILON {
 	    println!("float equivalence check failed, a: {}, b: {}", a, b);
 	    false
@@ -171,26 +182,19 @@ mod tests {
     }
     */
 
-    #[test]
-    fn sample_data_length() {
-	let sample = vec![1.0, 0.5,
-			  0.5, 1.0,
-			  1.0, 0.5];
-
-	let sample = Sample::new(sample, 16, 440.0, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, 16));
-	assert_eq!(sample.sample_data.len(), 64);
+    pub(crate) fn make_test_sample_data(nsamples: usize, samplerate: f64, freq: f64) -> Vec<f32> {
+	let omega = freq/samplerate * 2.0*PI;
+	(0..nsamples*2).map(|t| ((omega * (t/2) as f64).sin() as f32)).collect()
     }
 
 
-    fn make_test_sample(nsamples: usize, samplerate: f64, freq: f64) -> Sample {
-	let omega = freq/samplerate * 2.0*PI;
-	let sample_data = (0..nsamples*2).map(|t| ((omega * (t/2) as f64).sin() as f32)).collect();
-
+    pub(crate) fn make_test_sample(nsamples: usize, samplerate: f64, freq: f64) -> Sample {
+	let sample_data = make_test_sample_data(nsamples, samplerate, freq);
 	Sample::new(sample_data, nsamples, freq, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, nsamples))
     }
 
 
-    fn assert_frequency(mut sample: Sample, samplerate: f64, test_freq: f64) {
+    pub(crate) fn assert_frequency(mut sample: Sample, samplerate: f64, test_freq: f64) {
 	let mut halfw_l = 0.0;
 	let mut halfw_r = 0.0;
 	let mut last_l = 0.0;
@@ -227,32 +231,45 @@ mod tests {
 	}
     }
 
+
+    #[test]
+    fn sample_data_length() {
+	let sample = vec![1.0, 0.5,
+			  0.5, 1.0,
+			  1.0, 0.5];
+
+	let sample = Sample::new(sample, 16, 440.0, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, 16));
+	assert_eq!(sample.sample_data.len(), 64);
+    }
+
     #[test]
     fn test_test_sample_native() {
-	let mut sample = make_test_sample(36000, 48000.0, 440.0);
-	sample.note_on(440.0, 1.0);
+	let mut sample = make_test_sample(36000, 48000.0, wmidi::Note::A3.to_freq_f64());
+	let note = wmidi::Note::A3;
+	sample.note_on(note, note.to_freq_f64(), 1.0);
 	assert_frequency(sample, 48000.0, 440.0);
     }
 
     #[test]
     fn test_test_sample_half_tone_up() {
-	let mut sample = make_test_sample(36000, 48000.0, 440.0);
-	sample.note_on(466.16, 1.0);
+	let mut sample = make_test_sample(36000, 48000.0, wmidi::Note::A3.to_freq_f64());
+	let note = wmidi::Note::ASharp3;
+	sample.note_on(note, note.to_freq_f64(), 1.0);
 	assert_frequency(sample, 48000.0, 466.16);
     }
 
     #[test]
     fn test_test_sample_half_tone_down() {
-	let mut sample = make_test_sample(36000, 48000.0, 440.0);
-	sample.note_on(415.30, 1.0);
+	let mut sample = make_test_sample(36000, 48000.0, wmidi::Note::A3.to_freq_f64());
+	let note = wmidi::Note::Ab3;
+	sample.note_on(note, note.to_freq_f64(), 1.0);
 	assert_frequency(sample, 48000.0, 415.30);
     }
 
     #[test]
     fn test_pitch_up_at_start() {
-	let mut sample = make_test_sample(36000, 48000.0, 440.0);
-	sample.note_on(880.0, 1.0);
-
+	let mut sample = make_test_sample(36000, 48000.0, wmidi::Note::A3.to_freq_f64());
+	sample.note_on(wmidi::Note::A3, 880.0, 1.0);
 
 	while sample.is_playing() {
 	    let mut out_left = [0.0; 4096];
@@ -263,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_pitch_up_late() {
-	let mut sample = make_test_sample(36000, 48000.0, 440.0);
-	sample.note_on(440.0, 1.0);
+	let mut sample = make_test_sample(36000, 48000.0, wmidi::Note::A3.to_freq_f64());
+	sample.note_on(wmidi::Note::A3, 440.0, 1.0);
 
 	let pitch_freq = 440.0;
 	while sample.is_playing() {
@@ -287,10 +304,12 @@ mod tests {
 			  1.0, 0.5];
 
 	let max_block_length = 8;
-	let frequency = 1.0;
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+
 	let mut sample = Sample::new(sample, max_block_length, frequency, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length));
 
-	sample.note_on(frequency, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left: [f32; 2] = [0.0, 0.0];
 	let mut out_right: [f32; 2] = [0.0, 0.0];
@@ -331,10 +350,12 @@ mod tests {
 	];
 
 	let max_block_length = 8;
-	let frequency = 1.0;
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+
 	let mut sample = Sample::new(sample_data, max_block_length, frequency, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length));
 
-	sample.note_on(frequency, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left: [f32; 2] = [0.0; 2];
 	let mut out_right: [f32; 2] = [0.0; 2];
@@ -343,7 +364,10 @@ mod tests {
 	assert!(f32_eq(out_left[0], 0.0));
 	assert!(f32_eq(out_right[0], 2.0));
 
-	sample.note_on(frequency*2.0, 1.0);
+	let note = wmidi::Note::C4;
+	let frequency = note.to_freq_f64();
+	sample.note_on(note, frequency, 1.0);
+
 	let mut out_left: [f32; 4] = [0.0; 4];
 	let mut out_right: [f32; 4] = [0.0; 4];
 
@@ -367,11 +391,10 @@ mod tests {
 	assert!(!sample.is_playing());
     }
 
-    fn make_envelope_test_sample() -> Sample {
+    fn make_envelope_test_sample(frequency: f64) -> Sample {
 	let sample = vec![1.0; 96];
 
 	let max_block_length = 16;
-	let frequency = 1.0;
 
 	let mut eg = envelopes::Generator::default();
 	eg.set_attack(2.0).unwrap();
@@ -385,9 +408,11 @@ mod tests {
 
     #[test]
     fn note_on_monophonic_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 12];
 	let mut out_right = [0.0; 12];
@@ -400,9 +425,11 @@ mod tests {
 
     #[test]
     fn sustain_monophonic_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0);
+	sample.note_on(note, frequency, 1.0);
 	let mut out_left = [0.0; 12];
 	let mut out_right = [0.0; 12];
 
@@ -422,9 +449,11 @@ mod tests {
 
     #[test]
     fn sustain_polyphonic_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 12];
 	let mut out_right = [0.0; 12];
@@ -442,7 +471,9 @@ mod tests {
 	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
 	assert_eq!(out.as_slice(), [0.6; 12]);
 
-	sample.note_on(2.0, 1.0);
+	let note = wmidi::Note::C4;
+	let frequency = note.to_freq_f64();
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 12];
 	let mut out_right = [0.0; 12];
@@ -456,16 +487,18 @@ mod tests {
 
     #[test]
     fn note_off_during_attack_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 2.0);
+	sample.note_on(note, frequency, 2.0);
 
 	let mut out_left = [0.0; 1];
 	let mut out_right = [0.0; 1];
 
 	sample.process(&mut out_left, &mut out_right);
 
-	sample.note_off(1.0);
+	sample.note_off(note);
 
 	let mut out_left = [0.0; 2];
 	let mut out_right = [0.0; 2];
@@ -486,16 +519,18 @@ mod tests {
 
     #[test]
     fn note_off_during_hold_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 3];
 	let mut out_right = [0.0; 3];
 
 	sample.process(&mut out_left, &mut out_right);
 
-	sample.note_off(1.0);
+	sample.note_off(note);
 
 	let mut out_left = [0.0; 2];
 	let mut out_right = [0.0; 2];
@@ -516,16 +551,18 @@ mod tests {
 
     #[test]
     fn note_off_during_decay_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0/0.65413);
+	sample.note_on(note, frequency, 1.0/0.65413);
 
 	let mut out_left = [0.0; 5];
 	let mut out_right = [0.0; 5];
 
 	sample.process(&mut out_left, &mut out_right);
 
-	sample.note_off(1.0);
+	sample.note_off(note);
 
 	let mut out_left = [0.0; 2];
 	let mut out_right = [0.0; 2];
@@ -546,16 +583,18 @@ mod tests {
 
     #[test]
     fn note_off_during_sustain_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0/0.6);
+	sample.note_on(note, frequency, 1.0/0.6);
 
 	let mut out_left = [0.0; 16];
 	let mut out_right = [0.0; 16];
 
 	sample.process(&mut out_left, &mut out_right);
 
-	sample.note_off(1.0);
+	sample.note_off(note);
 
 	let mut out_left = [0.0; 2];
 	let mut out_right = [0.0; 2];
@@ -574,12 +613,13 @@ mod tests {
 	assert_eq!(out.as_slice(), [0.0049, 0.0010, 0.0002, 0.0, 0.0]);
     }
 
-
     #[test]
     fn note_on_polyphonic_sample_process() {
-	let mut sample = make_envelope_test_sample();
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	let mut sample = make_envelope_test_sample(frequency);
 
-	sample.note_on(1.0, 1.0);
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 8];
 	let mut out_right = [0.0; 8];
@@ -589,7 +629,9 @@ mod tests {
 	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
 	assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6]);
 
-	sample.note_on(2.0, 1.0);
+	let note = wmidi::Note::C3;
+	let frequency = note.to_freq_f64();
+	sample.note_on(note, frequency, 1.0);
 
 	let mut out_left = [0.0; 8];
 	let mut out_right = [0.0; 8];
@@ -598,6 +640,28 @@ mod tests {
 
 	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
 	assert_eq!(out.as_slice(), [0.6, 1.1, 1.6, 1.6, 1.6, 1.25, 1.21, 1.2]);
+    }
+
+    #[test]
+    fn note_on_off_frequencies() {
+	let sample_dat = vec![1.0; 1 << 24];
+	let eg = envelopes::Generator::default();
+	let mut sample = Sample::new(sample_dat, 4, 1.0, envelopes::ADSREnvelope::new(&eg, 1.0, 4));
+
+	for n in 0u8..127u8 {
+	    let note = wmidi::Note::try_from(n).unwrap();
+	    sample.note_on(note, note.to_freq_f64(), 1.0);
+	    assert!(sample.is_playing_note(note));
+	}
+	for n in 0u8..127u8 {
+	    let note = wmidi::Note::try_from(n).unwrap();
+	    sample.note_off(note);
+	    let mut out_left = [0.0; 2];
+	    let mut out_right = [0.0; 2];
+	    sample.process(&mut out_left, &mut out_right);
+	    assert!(!sample.is_playing_note(note));
+	}
+	assert!(!sample.is_playing());
     }
 
     #[test]
