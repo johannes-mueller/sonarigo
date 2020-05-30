@@ -1,4 +1,3 @@
-
 [workspace]
-members = ["soundfonts", "sonariga-jack"]
-default-members = ["soundfonts", "sonariga-jack"]
+members = ["soundfonts", "sonarigo-lv2", "sonarigo-jack"]
+default-members = ["soundfonts", "sonarigo-lv2"]

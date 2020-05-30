@@ -9,4 +9,4 @@ pub mod engine;
 mod sample;
 mod envelopes;
 mod errors;
-mod utils;
+pub mod utils;
