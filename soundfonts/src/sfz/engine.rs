@@ -413,10 +413,6 @@ impl Region {
 
     }
 
-    fn is_playing_note(&self, note: wmidi::Note) -> bool {
-	self.sample.is_playing_note(note)
-    }
-
     fn note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
 	println!("note on {}", note);
 	let velocity = u8::from(velocity);
@@ -470,10 +466,6 @@ impl Region {
     }
 
     fn handle_note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) -> bool {
-	if self.is_playing_note(note) && !self.sample.is_releasing_note(note) {
-	    return false;
-	}
-
 	if !self.params.key_range.covering(note) {
 	    self.other_notes_on.insert(u8::from(note));
 	    return false;
@@ -1418,7 +1410,7 @@ mod tests {
 	assert!(f32_eq(out_right[0], 0.5));
 	assert!(f32_eq(out_right[1], 1.0));
 
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	let mut out_left: [f32; 2] = [-0.5, -0.2];
 	let mut out_right: [f32; 2] = [-0.2, -0.5];
@@ -1430,7 +1422,7 @@ mod tests {
 	assert!(f32_eq(out_right[0], 0.3));
 	assert!(f32_eq(out_right[1], -0.5));
 
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
     #[test]
@@ -1544,8 +1536,8 @@ mod tests {
 
 	engine.process(&mut out_left, &mut out_right);
 
-	assert!(!engine.regions[0].is_playing_note(wmidi::Note::C3));
-	assert!(!engine.regions[1].is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
 
 	assert_eq!(out_left[0], 0.5);
 	assert_eq!(out_left[1], 0.0);
@@ -1579,22 +1571,22 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MAX), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::E2));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E2));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::E2, wmidi::Velocity::MIN), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::E2));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E2));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::E3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::E2));
-	assert!(region.is_playing_note(wmidi::Note::E3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E2));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::E3));
 	assert_eq!(region.gain, 0.24607849215698431397);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::E3, wmidi::Velocity::MIN), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::E2));
-	assert!(region.is_playing_note(wmidi::Note::E3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E2));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::E3));
 	pull_samples(&mut region, 2);
-	assert!(!region.is_playing_note(wmidi::Note::E2));
-	assert!(!region.is_playing_note(wmidi::Note::E3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E2));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::E3));
     }
 
 
@@ -1607,23 +1599,23 @@ mod tests {
 
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(90).unwrap()), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	let mut out_left = [0.0; 1];
 	let mut out_right = [0.0; 1];
 	region.process(&mut out_left, &mut out_right);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	assert_eq!(out_left[0], 0.24607849215698431397);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
 	pull_samples(&mut region, 2);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
 
@@ -1666,10 +1658,10 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	assert_eq!(region.gain, 0.24607849215698431397);
     }
 
@@ -1767,7 +1759,7 @@ mod tests {
 	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	let (ol, _) = pull_samples(&mut region, 1);
 	assert_eq!(ol[0], 0.24607849215698431397);
 
@@ -1777,7 +1769,7 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
     	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -1793,7 +1785,7 @@ mod tests {
 	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	let (ol, _) = pull_samples(&mut region, 1);
 	assert_eq!(ol[0], 0.24607849215698431397);
     }
@@ -1808,7 +1800,7 @@ mod tests {
 	assert!(!region.sample.is_playing());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	let (ol, _) = pull_samples(&mut region, 1);
 	assert_eq!(ol[0], 0.24607849215698431397);
     }
@@ -1825,14 +1817,14 @@ mod tests {
 	assert!(!region.sample.is_playing());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 	assert!(!region.sample.is_playing());
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 	let (ol, _) = pull_samples(&mut region, 1);
 	assert_eq!(ol[0], 0.24607849215698431397);
     }
@@ -1868,7 +1860,7 @@ mod tests {
 	), 0.0);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -1913,7 +1905,7 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
     	let mut rd = RegionData::default();
 	rd.key_range.set_hi(60).unwrap();
@@ -1934,7 +1926,7 @@ mod tests {
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
     #[test]
@@ -1956,7 +1948,7 @@ mod tests {
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3,  wmidi::Velocity::MAX), 0.0);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
         let mut rd = RegionData::default();
 	rd.key_range.set_hi(60).unwrap();
@@ -1976,7 +1968,7 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -1986,7 +1978,7 @@ mod tests {
 	), 0.0);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -2009,7 +2001,7 @@ mod tests {
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 
 	pull_samples(&mut region, 2);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
     #[test]
@@ -2023,7 +2015,7 @@ mod tests {
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 
 	pull_samples(&mut region, 2);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
     #[test]
@@ -2033,11 +2025,11 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 	pull_samples(&mut region, 2);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
     }
 
     #[test]
@@ -2046,7 +2038,7 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -2062,10 +2054,10 @@ mod tests {
 	    wmidi::ControlValue::try_from(63).unwrap()
 	), 0.0);
 
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	pull_samples(&mut region, 2);
 	assert!(!region.sample.is_playing());
@@ -2077,7 +2069,7 @@ mod tests {
 	let mut region = make_dummy_region(rd, 1.0, 2);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
 
 	// sustain pedal on
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -2087,13 +2079,13 @@ mod tests {
 	), 0.0);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::D3,  wmidi::Velocity::MAX), 0.0);
-	assert!(region.is_playing_note(wmidi::Note::C3));
-	assert!(region.is_playing_note(wmidi::Note::D3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::D3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3,  wmidi::Velocity::MAX), 0.0);
 	pull_samples(&mut region, 2);
-	assert!(region.is_playing_note(wmidi::Note::C3));
-	assert!(region.is_playing_note(wmidi::Note::D3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::D3));
 
 	// sustain pedal off
 	region.pass_midi_msg(&wmidi::MidiMessage::ControlChange(
@@ -2103,8 +2095,8 @@ mod tests {
 	), 0.0);
 
 	pull_samples(&mut region, 2);
-	assert!(!region.is_playing_note(wmidi::Note::C3));
-	assert!(region.is_playing_note(wmidi::Note::D3));
+	assert!(!sample::tests::is_playing_note(&region.sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&region.sample, wmidi::Note::D3));
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::D3,  wmidi::Velocity::MAX), 0.0);
 	pull_samples(&mut region, 2);
@@ -2458,7 +2450,7 @@ mod tests {
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	}
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
 	assert!(!engine.regions[1].sample.is_playing());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
@@ -2467,7 +2459,7 @@ mod tests {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.5);
 	}
 	assert!(!engine.regions[0].sample.is_playing());
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
 	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
@@ -2477,7 +2469,7 @@ mod tests {
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
 	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::C3) ^ engine.regions[1].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3) ^ sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
     }
 
     fn pull_samples_engine(engine: &mut Engine, nsamples: usize) {
@@ -2510,56 +2502,56 @@ mod tests {
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::A2));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::A2));
 	assert!(!engine.regions[1].sample.is_playing());
 	assert!(!engine.regions[2].sample.is_playing());
 	assert!(!engine.regions[3].sample.is_playing());
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::A2));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::A2));
 	assert!(!engine.regions[1].sample.is_playing());
 	assert!(!engine.regions[2].sample.is_playing());
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::Db3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::Db3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::A2));
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::Db3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::A2));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::Db3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::Db3));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::Db3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::Db3, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
-	assert!(!engine.regions[3].is_playing_note(wmidi::Note::Db3));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::Db3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::B2));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
-	assert!(!engine.regions[3].is_playing_note(wmidi::Note::Db3));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::B2));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
+	assert!(!sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::Db3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
 	assert!(!engine.regions[1].sample.is_playing());
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::B2));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::B2));
 	assert!(!engine.regions[3].sample.is_playing());
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::B2, wmidi::Velocity::MAX));
@@ -2591,24 +2583,24 @@ mod tests {
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(30).unwrap()));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
 	assert!(!engine.regions[1].sample.is_playing());
 	assert!(!engine.regions[2].sample.is_playing());
 	assert!(!engine.regions[3].sample.is_playing());
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(55).unwrap()));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
 	assert!(!engine.regions[1].sample.is_playing());
 	assert!(!engine.regions[2].sample.is_playing());
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(50).unwrap()));
 	pull_samples_engine(&mut engine, 1);
-	assert!(engine.regions[0].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[1].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
-	assert!(engine.regions[3].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[3].sample, wmidi::Note::C3));
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));
 	pull_samples_engine(&mut engine, 1);
@@ -2621,7 +2613,7 @@ mod tests {
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
 	assert!(!engine.regions[1].sample.is_playing());
-	assert!(engine.regions[2].is_playing_note(wmidi::Note::C3));
+	assert!(sample::tests::is_playing_note(&engine.regions[2].sample, wmidi::Note::C3));
 	assert!(!engine.regions[3].sample.is_playing());
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOff(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN));

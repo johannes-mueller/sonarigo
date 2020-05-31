@@ -66,14 +66,6 @@ impl Sample {
 	!self.voices.is_empty()
     }
 
-    pub fn is_playing_note(&self, note: wmidi::Note) -> bool {
-	self.voices.iter().any(|v| v.note == note)
-    }
-
-    pub fn is_releasing_note(&self, note: wmidi::Note) -> bool {
-	!self.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
-    }
-
     pub fn note_on(&mut self, note: wmidi::Note, frequency: f64, gain: f32) {
 	self.note_off(note);
 	self.voices.push(Voice::new(note, frequency, gain))
@@ -181,6 +173,14 @@ pub(crate) mod tests {
 	assert_eq!(it.next(), Some((0.0, 0.0)));
     }
     */
+
+    pub fn is_playing_note(sample: &Sample, note: wmidi::Note) -> bool {
+	sample.voices.iter().any(|v| v.note == note)
+    }
+
+    pub fn is_releasing_note(sample: &Sample, note: wmidi::Note) -> bool {
+	!sample.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
+    }
 
     pub(crate) fn make_test_sample_data(nsamples: usize, samplerate: f64, freq: f64) -> Vec<f32> {
 	let omega = freq/samplerate * 2.0*PI;
@@ -673,7 +673,7 @@ pub(crate) mod tests {
 	for n in 0u8..127u8 {
 	    let note = wmidi::Note::try_from(n).unwrap();
 	    sample.note_on(note, note.to_freq_f64(), 1.0);
-	    assert!(sample.is_playing_note(note));
+	    assert!(is_playing_note(&sample, note));
 	}
 	for n in 0u8..127u8 {
 	    let note = wmidi::Note::try_from(n).unwrap();
@@ -681,7 +681,7 @@ pub(crate) mod tests {
 	    let mut out_left = [0.0; 2];
 	    let mut out_right = [0.0; 2];
 	    sample.process(&mut out_left, &mut out_right);
-	    assert!(!sample.is_playing_note(note));
+	    assert!(!is_playing_note(&sample, note));
 	}
 	assert!(!sample.is_playing());
     }
