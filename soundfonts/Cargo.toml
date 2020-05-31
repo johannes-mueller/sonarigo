@@ -1,6 +1,6 @@
 [package]
 name = "soundfonts"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Johannes Mueller <github@johannes-mueller.org>"]
 edition = "2018"
 
