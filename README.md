@@ -49,9 +49,6 @@ gain. That's it.
 
 ### Things I will definitely do
 
-* Support samples with sample rates different from the host, at least in a way
-  that samples are pitch shifted to the correct pitch.
-
 * Implement the important `loop_*` opcodes.
 
 

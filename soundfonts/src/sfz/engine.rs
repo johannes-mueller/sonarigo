@@ -5,6 +5,8 @@ use std::fmt;
 use std::error;
 use std::io;
 
+use log::warn;
+
 use crate::errors::*;
 use crate::engine;
 use crate::sample;
@@ -352,7 +354,7 @@ pub(super) struct Region {
 
     gain: f32,
 
-    samplerate: f64,
+    host_samplerate: f64,
 
     last_note_on: Option<(wmidi::Note, wmidi::Velocity)>,
     notes_for_release_trigger: HashSet<wmidi::Note>,
@@ -366,10 +368,11 @@ pub(super) struct Region {
 }
 
 impl Region {
-    fn new(params: RegionData, sample_data: Vec<f32>, samplerate: f64, max_block_length: usize) -> Region {
+    fn new(params: RegionData, sample_data: Vec<f32>, host_samplerate: f64, sample_samplerate: f64, max_block_length: usize) -> Region {
 
-	let amp_envelope = envelopes::ADSREnvelope::new(&params.ampeg, samplerate as f32, max_block_length);
-	let sample = sample::Sample::new(sample_data, max_block_length, params.pitch_keycenter.to_freq_f64(), amp_envelope);
+	let amp_envelope = envelopes::ADSREnvelope::new(&params.ampeg, host_samplerate as f32, max_block_length);
+	let freq_shift = host_samplerate / sample_samplerate;
+	let sample = sample::Sample::new(sample_data, max_block_length, params.pitch_keycenter.to_freq_f64() * freq_shift, amp_envelope);
 
 	Region {
 	    params: params,
@@ -378,7 +381,7 @@ impl Region {
 
 	    gain: 1.0,
 
-	    samplerate: samplerate,
+	    host_samplerate: host_samplerate,
 
 	    last_note_on: None,
 	    notes_for_release_trigger: HashSet::new(),
@@ -392,7 +395,7 @@ impl Region {
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
-	self.time_since_note_on += out_left.len() as f64 / self.samplerate;
+	self.time_since_note_on += out_left.len() as f64 / self.host_samplerate;
 
 	if !self.sample.is_playing() {
 	    return;
@@ -609,7 +612,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(sfz_file: String, samplerate: f64, max_block_length: usize) -> Result<Engine, EngineError> {
+    pub fn new(sfz_file: String, host_samplerate: f64, max_block_length: usize) -> Result<Engine, EngineError> {
 	let mut fh = std::fs::File::open(&sfz_file).map_err(|e| EngineError::IOError(e))?;
 	let mut sfz_text = String::new();
 	io::Read::read_to_string(&mut fh, &mut sfz_text).map_err(|e| EngineError::IOError(e))?;
@@ -618,21 +621,27 @@ impl Engine {
 
 	let sample_path = Path::new(&sfz_file).parent().unwrap();
 
-	let regions: Result<Vec<(RegionData, Vec<f32>)>, _> = region_data.iter().map( |rd| {
+	let regions: Result<Vec<(RegionData, Vec<f32>, f64)>, _> = region_data.iter().map( |rd| {
 	    let sample_file = rd.sample.replace("\\", &std::path::MAIN_SEPARATOR.to_string());
 	    println!("{}", sample_file);
 	    let mut snd = sndfile::OpenOptions::ReadOnly(sndfile::ReadOptions::Auto).from_path(sample_path.join(&sample_file))
 		.map_err(|sfe| EngineError::SndFileError(sfe))?;
 	    let sample = snd.read_all_to_vec().map_err(|_| EngineError::UnspecifiedSndFileError(sample_file))?;
-	    Ok((rd.clone(), sample))
+	    let sample_samplerate = snd.get_samplerate() as f64;
+	    if host_samplerate != sample_samplerate {
+		warn!("Sample rate of file {} differs from host sample rate. Reccomend resampling or using other host sample rate", rd.sample);
+	    }
+	    Ok((rd.clone(), sample, sample_samplerate))
 	}).collect();
 	println!("loaded");
-	regions.map(|data| Self::from_region_array(data, samplerate, max_block_length))
+	regions.map(|data| Self::from_region_array(data, host_samplerate, max_block_length))
     }
 
-    fn from_region_array(reg_data_sample: Vec<(RegionData, Vec<f32>)>, samplerate: f64, max_block_length: usize) -> Engine {
+    fn from_region_array(reg_data_sample: Vec<(RegionData, Vec<f32>, f64)>, host_samplerate: f64, max_block_length: usize) -> Engine {
 	Engine {
-	    regions: reg_data_sample.iter().map(|(rd, sample)| Region::new(rd.clone(), sample.to_vec(), samplerate, max_block_length)).collect(),
+	    regions: reg_data_sample.iter().map(|(rd, sample, s_samplerate)|
+						Region::new(rd.clone(), sample.to_vec(), host_samplerate, *s_samplerate, max_block_length))
+		.collect(),
 	}
     }
 }
@@ -1396,7 +1405,7 @@ mod tests {
 			  0.5, 1.0,
 			  1.0, 0.5];
 
-	let mut region = Region::new(RegionData::default(), sample, 1.0, 8);
+	let mut region = Region::new(RegionData::default(), sample, 1.0, 1.0, 8);
 
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
@@ -1432,7 +1441,7 @@ mod tests {
 	let mut region_data = RegionData::default();
 	region_data.set_volume(-20.0).unwrap();
 
-	let mut region = Region::new(region_data, sample, 1.0, 8);
+	let mut region = Region::new(region_data, sample, 1.0, 1.0, 8);
 
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
@@ -1451,7 +1460,7 @@ mod tests {
 	sample.resize(32, 1.0);
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 16);
+	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 1.0, 16);
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
@@ -1469,7 +1478,7 @@ mod tests {
 
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 12);
+	let mut region = Region::new(regions.get(0).unwrap().clone(), sample, 1.0, 1.0, 12);
 	region.note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
@@ -1505,7 +1514,7 @@ mod tests {
 
     #[test]
     fn engine_process_silence() {
-	let mut engine = Engine::from_region_array(vec![(RegionData::default(), Vec::new()), (RegionData::default(), Vec::new())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), Vec::new(), 1.0), (RegionData::default(), Vec::new(), 1.0)], 1.0, 16);
 
 	let mut out_left: [f32; 4] = [1.0; 4];
 	let mut out_right: [f32; 4] = [1.0; 4];
@@ -1526,7 +1535,7 @@ mod tests {
 			   -0.5, -0.5,
 			   0.0, 0.5];
 
-	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample1), (RegionData::default(), sample2)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample1, 1.0), (RegionData::default(), sample2, 1.0)], 1.0, 16);
 
 	engine.regions[0].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
 	engine.regions[1].note_on(wmidi::Note::C3, wmidi::Velocity::MAX);
@@ -1550,7 +1559,7 @@ mod tests {
 
     fn make_dummy_region(rd: RegionData, samplerate: f64, max_block_length: usize) -> Region {
 	let sample = vec![1.0; 96];
-	Region::new(rd, sample, samplerate, max_block_length)
+	Region::new(rd, sample, samplerate, samplerate, max_block_length)
     }
 
     fn pull_samples(region: &mut Region, nsamples: usize) -> (Vec<f32>, Vec<f32>) {
@@ -2171,7 +2180,7 @@ mod tests {
 			  0.4, -0.4,
 			  0.5, -0.5];
 
-	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample, 1.0)], 1.0, 16);
 
 	let mut out_left: [f32; 1] = [0.0];
 	let mut out_right: [f32; 1] = [0.0];
@@ -2208,7 +2217,7 @@ mod tests {
 	sample.resize(48, 1.0);
 	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
 
-	let mut engine = Engine::from_region_array(vec![(regions[0].clone(), sample)], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(regions[0].clone(), sample, 1.0)], 1.0, 16);
 
 	let mut out_left: [f32; 12] = [0.0; 12];
 	let mut out_right: [f32; 12] = [0.0; 12];
@@ -2242,7 +2251,7 @@ mod tests {
     #[test]
     fn note_on_velocity() {
 	let sample = vec![1.0, 1.0];
-	let mut region = Region::new(RegionData::default(), sample, 1.0, 16);
+	let mut region = Region::new(RegionData::default(), sample, 1.0, 1.0, 16);
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(63).unwrap()), 0.0);
 
 	let mut out_left: [f32; 1] = [0.0];
@@ -2259,7 +2268,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_amp_veltrack(0.0).unwrap();
 
-	let mut region = Region::new(rd, sample.clone(), 1.0, 16);
+	let mut region = Region::new(rd, sample.clone(), 1.0, 1.0, 16);
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 
@@ -2285,7 +2294,7 @@ mod tests {
 	let mut rd = RegionData::default();
 	rd.set_amp_veltrack(-100.0).unwrap();
 
-	let mut region = Region::new(rd, sample.clone(), 1.0, 16);
+	let mut region = Region::new(rd, sample.clone(), 1.0, 1.0, 16);
 
 
 	region.pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MIN), 0.0);
@@ -2317,7 +2326,7 @@ mod tests {
 
 	let region = parse_sfz_text("<region> lokey=60 hikey=60".to_string()).unwrap()[0].clone();
 
-	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone(), 1.0)], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 
@@ -2328,7 +2337,7 @@ mod tests {
 	assert!(f32_eq(out_left[0], 0.0));
 	assert!(f32_eq(out_right[0], 0.0));
 
-	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone())], 1.0, 16);
+	let mut engine = Engine::from_region_array(vec![(region.clone(), sample.clone(), 1.0)], 1.0, 16);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 
@@ -2359,7 +2368,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2368,7 +2377,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 880.0);
@@ -2379,7 +2388,7 @@ mod tests {
 	rd.set_pitch_keytrack(0.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2389,7 +2398,7 @@ mod tests {
 	rd.set_pitch_keytrack(0.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2400,7 +2409,7 @@ mod tests {
 	rd.set_pitch_keytrack(-100.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2410,7 +2419,7 @@ mod tests {
 	rd.set_pitch_keytrack(-100.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A4, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 220.0);
@@ -2421,7 +2430,7 @@ mod tests {
 	rd.set_pitch_keytrack(1200.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2431,7 +2440,7 @@ mod tests {
 	rd.set_pitch_keytrack(1200.0).unwrap();
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 880.0);
@@ -2446,7 +2455,7 @@ mod tests {
 	rd.pitch_keycenter = wmidi::Note::A3;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2457,7 +2466,7 @@ mod tests {
 	rd.tune = 1.0;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::Ab3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2468,7 +2477,7 @@ mod tests {
 	rd.tune = -1.0;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::ASharp3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 440.0);
@@ -2479,7 +2488,7 @@ mod tests {
 	rd.tune = 1.0;
 
 	let sample_data = sampletests::make_test_sample_data(nsamples, samplerate, 440.0);
-	let mut region = Region::new(rd, sample_data, samplerate, nsamples);
+	let mut region = Region::new(rd, sample_data, samplerate, samplerate, nsamples);
 
 	region.note_on(wmidi::Note::A3, wmidi::Velocity::MAX);
 	sampletests::assert_frequency(region.sample, samplerate, 466.16);
@@ -2488,7 +2497,7 @@ mod tests {
     #[test]
     fn trigger_rand() {
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2496,7 +2505,7 @@ mod tests {
 	assert!(!engine.regions[1].sample.is_playing());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2504,7 +2513,7 @@ mod tests {
 	assert!(!engine.regions[1].sample.is_playing());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.0);
 	}
@@ -2512,7 +2521,7 @@ mod tests {
 	assert!(!engine.regions[1].sample.is_playing());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	for i in 0..2 {
 	    engine.regions[i].pass_midi_msg(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX), 0.5);
 	}
@@ -2520,12 +2529,12 @@ mod tests {
 	assert!(sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::MAX));
 	assert!(!engine.regions[0].sample.is_playing() && !engine.regions[1].sample.is_playing());
 
 	let region_text = "<region> key=c4 lorand=0.0 hirand=0.5 <region> key=c4 lorand=0.5 hirand=1.0".to_string();
-	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new())).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(parse_sfz_text(region_text).unwrap().iter().map(|reg| (reg.clone(), Vec::new(), 1.0)).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
 	assert!(sample::tests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3) ^ sample::tests::is_playing_note(&engine.regions[1].sample, wmidi::Note::C3));
     }
@@ -2549,7 +2558,7 @@ mod tests {
 ".to_string();
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96])).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96], 1.0)).collect(), 1.0, 1);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A1, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
@@ -2631,7 +2640,7 @@ mod tests {
 
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96])).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96], 1.0)).collect(), 1.0, 1);
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(20).unwrap()));
 	pull_samples_engine(&mut engine, 1);
 	assert!(!engine.regions[0].sample.is_playing());
@@ -2696,7 +2705,7 @@ mod tests {
 
 	let regions = parse_sfz_text(region_text).unwrap();
 
-	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96])).collect(), 1.0, 1);
+	let mut engine = Engine::from_region_array(regions.iter().map(|reg| (reg.clone(), vec![1.0; 96], 1.0)).collect(), 1.0, 1);
 
 	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A2, wmidi::Velocity::MAX));
 	pull_samples_engine(&mut engine, 1);
@@ -2771,4 +2780,72 @@ mod tests {
 
 	assert!(!Iterator::zip(reference.iter(), result.iter()).any( |(a, b)| a != *b ));
     }
+
+    #[test]
+    fn test_samplerate_shift() {
+	let goal = 96000 / 1024;
+
+	let mut engine = Engine::new("assets/samplerate-shift-test.sfz".to_string(), 48000.0, 1024).unwrap();
+
+	let mut out_left = Vec::new();
+	out_left.resize(goal*1024, 0.0);
+	let mut out_right = Vec::new();
+	out_right.resize(goal*1024, 0.0);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::try_from(48).unwrap()));
+	for i in 1..goal {
+	    engine.process(&mut out_left[i*1024..(i+1)*1024], &mut out_right[i*1024..(i+1)*1024]);
+	}
+
+	sampletests::assert_frequency_result_sample(&out_left[4096..60000], engine.regions[0].host_samplerate, 440.0);
+	sampletests::assert_frequency_result_sample(&out_right[4096..60000], engine.regions[0].host_samplerate, 440.0);
+
+
+	let mut engine = Engine::new("assets/samplerate-shift-test.sfz".to_string(), 44100.0, 1024).unwrap();
+
+	let mut out_left = Vec::new();
+	out_left.resize(goal*1024, 0.0);
+	let mut out_right = Vec::new();
+	out_right.resize(goal*1024, 0.0);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::try_from(44).unwrap()));
+	for i in 1..goal {
+	    engine.process(&mut out_left[i*1024..(i+1)*1024], &mut out_right[i*1024..(i+1)*1024]);
+	}
+
+	sampletests::assert_frequency_result_sample(&out_left[4096..60000], engine.regions[0].host_samplerate, 440.0);
+	sampletests::assert_frequency_result_sample(&out_right[4096..60000], engine.regions[0].host_samplerate, 440.0);
+
+	let mut engine = Engine::new("assets/samplerate-shift-test.sfz".to_string(), 44100.0, 1024).unwrap();
+
+	let mut out_left = Vec::new();
+	out_left.resize(goal*1024, 0.0);
+	let mut out_right = Vec::new();
+	out_right.resize(goal*1024, 0.0);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::try_from(48).unwrap()));
+	for i in 1..goal {
+	    engine.process(&mut out_left[i*1024..(i+1)*1024], &mut out_right[i*1024..(i+1)*1024]);
+	}
+
+	sampletests::assert_frequency_result_sample(&out_left[4096..60000], engine.regions[0].host_samplerate, 440.0);
+	sampletests::assert_frequency_result_sample(&out_right[4096..60000], engine.regions[0].host_samplerate, 440.0);
+
+	let mut engine = Engine::new("assets/samplerate-shift-test.sfz".to_string(), 48000.0, 1024).unwrap();
+
+	let mut out_left = Vec::new();
+	out_left.resize(goal*1024, 0.0);
+	let mut out_right = Vec::new();
+	out_right.resize(goal*1024, 0.0);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::A3, wmidi::Velocity::try_from(44).unwrap()));
+	for i in 1..goal {
+	    engine.process(&mut out_left[i*1024..(i+1)*1024], &mut out_right[i*1024..(i+1)*1024]);
+	}
+
+	sampletests::assert_frequency_result_sample(&out_left[4096..60000], engine.regions[0].host_samplerate, 440.0);
+	sampletests::assert_frequency_result_sample(&out_right[4096..60000], engine.regions[0].host_samplerate, 440.0);
+
+    }
+
 }

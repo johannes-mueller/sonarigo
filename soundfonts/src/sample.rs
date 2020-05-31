@@ -232,10 +232,37 @@ pub(crate) mod tests {
 	    panic!("left frequency does not match {} {} {}", halfw_l * to_freq, (halfw_l + 1.0) * to_freq, test_freq)
 	}
 	if  halfw_r * to_freq > test_freq || (halfw_r + 1.0) * to_freq < test_freq {
-	    panic!("left frequency does not match {} {} {}", halfw_r * to_freq, (halfw_r + 1.0) * to_freq, test_freq)
+	    panic!("right frequency does not match {} {} {}", halfw_r * to_freq, (halfw_r + 1.0) * to_freq, test_freq)
 	}
     }
 
+    pub(crate) fn assert_frequency_result_sample(sample: &[f32], samplerate: f64, test_freq: f64) {
+	let mut halfw = 0.0;
+	let mut last = 0.0;
+
+	for s in sample.iter() {
+	    if s * last < 0.0 {
+		halfw += 0.5
+	    }
+	    last = *s
+	}
+
+	let to_freq = samplerate/sample.len() as f64;
+
+	if (halfw - 1.0) * to_freq > test_freq || (halfw + 1.0) * to_freq < test_freq {
+	    panic!("sample frequency does not match {} {} {} / {} samples, {} {}", halfw * to_freq, (halfw + 1.0) * to_freq, test_freq, sample.len(), halfw, test_freq/to_freq)
+	}
+    }
+
+    #[test]
+    fn test_frequency_assertion() {
+	let freq = 440.0;
+	let samplerate = 48000.0;
+
+	let omega = freq/samplerate * 2.0*PI;
+	let test_sample: Vec<f32> = (0..96000).map(|t| ((omega * t as f64).sin() as f32)).collect();
+	assert_frequency_result_sample(&test_sample, samplerate, freq);
+    }
 
     #[test]
     fn sample_data_length() {

@@ -1,0 +1,2 @@
+<region> key=a4 hivel=48 lovel=48 sample=sine-440Hz-48000sr.flac
+<region> key=a4 hivel=44 lovel=44 sample=sine-440Hz-44100sr.flac
