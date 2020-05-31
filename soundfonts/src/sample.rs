@@ -75,6 +75,7 @@ impl Sample {
     }
 
     pub fn note_on(&mut self, note: wmidi::Note, frequency: f64, gain: f32) {
+	self.note_off(note);
 	self.voices.push(Voice::new(note, frequency, gain))
     }
 
@@ -637,8 +638,30 @@ pub(crate) mod tests {
 
 	sample.process(&mut out_left, &mut out_right);
 
-	let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
-	assert_eq!(out.as_slice(), [0.6, 1.1, 1.6, 1.6, 1.6, 1.25, 1.21, 1.2]);
+        let out: Vec<f32> = out_left.iter().map(|v| (v * 10000.0).round() / 10000.0).collect();
+        assert_eq!(out.as_slice(),[0.0727, 0.5147, 1.003, 1.0006, 1.0001, 0.6542, 0.6073, 0.601]);
+    }
+
+    #[test]
+    fn note_on_note_on() {
+        let note = wmidi::Note::C3;
+        let frequency = note.to_freq_f64();
+        let mut sample = make_envelope_test_sample(frequency);
+
+        sample.note_on(note, frequency, 1.0);
+        let mut out_left = [0.0; 2];
+        let mut out_right = [0.0; 2];
+        sample.process(&mut out_left, &mut out_right);
+
+        assert!(sample.voices[0].envelope_state.is_active() && !sample.voices[0].envelope_state.is_releasing());
+        assert_eq!(sample.voices[0].position, 2.0);
+
+        sample.note_on(note, frequency, 1.0);
+        assert!(sample.voices[0].envelope_state.is_releasing());
+        assert!(sample.voices[1].envelope_state.is_active()&& !sample.voices[1].envelope_state.is_releasing());
+
+        assert_eq!(sample.voices[0].position, 2.0);
+        assert_eq!(sample.voices[1].position, 0.0);
     }
 
     #[test]
