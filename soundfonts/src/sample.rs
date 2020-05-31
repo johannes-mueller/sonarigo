@@ -175,12 +175,17 @@ pub(crate) mod tests {
     */
 
     pub fn is_playing_note(sample: &Sample, note: wmidi::Note) -> bool {
-	sample.voices.iter().any(|v| v.note == note)
+	sample.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
     }
 
     pub fn is_releasing_note(sample: &Sample, note: wmidi::Note) -> bool {
-	!sample.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
+	sample.voices.iter().any(|v| v.note == note && v.envelope_state.is_releasing())
     }
+
+    pub fn is_playing_or_releasing_note(sample: &Sample, note: wmidi::Note) -> bool {
+	sample.voices.iter().any(|v| v.note == note)
+    }
+
 
     pub(crate) fn make_test_sample_data(nsamples: usize, samplerate: f64, freq: f64) -> Vec<f32> {
 	let omega = freq/samplerate * 2.0*PI;
@@ -655,13 +660,23 @@ pub(crate) mod tests {
 
         assert!(sample.voices[0].envelope_state.is_active() && !sample.voices[0].envelope_state.is_releasing());
         assert_eq!(sample.voices[0].position, 2.0);
+	assert!(is_playing_note(&sample, note));
+	assert!(!is_releasing_note(&sample, note));
 
         sample.note_on(note, frequency, 1.0);
         assert!(sample.voices[0].envelope_state.is_releasing());
         assert!(sample.voices[1].envelope_state.is_active()&& !sample.voices[1].envelope_state.is_releasing());
 
+	assert!(is_playing_note(&sample, note));
+	assert!(is_releasing_note(&sample, note));
+
         assert_eq!(sample.voices[0].position, 2.0);
         assert_eq!(sample.voices[1].position, 0.0);
+
+	sample.note_off(note);
+
+	assert!(!is_playing_note(&sample, note));
+	assert!(is_releasing_note(&sample, note));
     }
 
     #[test]
