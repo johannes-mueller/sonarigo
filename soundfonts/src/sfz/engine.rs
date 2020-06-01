@@ -666,6 +666,9 @@ impl engine::EngineTrait for Engine {
     }
 
     fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+	if out_left.len() * out_right.len() == 0 {
+	    return;
+	}
 	for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
 	    *l = 0.0;
 	    *r = 0.0;
@@ -2848,4 +2851,16 @@ mod tests {
 
     }
 
+    #[test]
+    fn test_unreasonable_process_calls_zero_length_buffer() {
+    	let sample = vec![0.1, -0.1];
+	let mut engine = Engine::from_region_array(vec![(RegionData::default(), sample, 1.0)], 1.0, 16);
+
+	let mut out_left = Vec::new();
+	let mut out_right = Vec::new();
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::try_from(44).unwrap()));
+
+	engine.process(&mut out_left, &mut out_right);
+    }
 }
