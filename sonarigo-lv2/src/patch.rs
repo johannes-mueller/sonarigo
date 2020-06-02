@@ -44,7 +44,7 @@ where
     type WriteHandle = PatchSetWriter<'a, 'b>;
 
     fn read(body: Space<'a>, _: ()) -> Option<PatchSetReader> {
-	println!("Value read");
+        println!("Value read");
         Some(PatchSetReader { space: body })
     }
 
@@ -64,7 +64,7 @@ where
     type WriteHandle = PatchSetWriter<'a, 'b>;
 
     fn read(body: Space<'a>, _: ()) -> Option<PatchSetReader> {
-	println!("Property read");
+        println!("Property read");
         Some(PatchSetReader { space: body })
     }
 
@@ -105,7 +105,7 @@ where
         mut frame: FramedMutSpace<'a, 'b>,
         unit: TimeStampURID,
     ) -> Option<SequenceWriter<'a, 'b>> {
-	None
+        None
     }
 }
 
@@ -127,7 +127,7 @@ where
         mut frame: FramedMutSpace<'a, 'b>,
         unit: TimeStampURID,
     ) -> Option<SequenceWriter<'a, 'b>> {
-	None
+        None
     }
 }
 */

@@ -25,7 +25,7 @@ where
     type WriteHandle = AtomPathWriter<'a, 'b>;
 
     fn read(body: Space<'a>, _: ()) -> Option<&'a str> {
-	body.data()
+        body.data()
             .and_then(|data| std::str::from_utf8(data).ok())
     }
 
@@ -94,91 +94,91 @@ impl Plugin for SonarigoLV2 {
     type AudioFeatures = AudioFeatures<'static>;
 
     fn new(plugin_info: &PluginInfo, features: &mut Features<'static>) -> Option<Self> {
-	let samplerate = plugin_info.sample_rate();
-	let max_block_length = 8192; /*FIXME*/
-	let engine = engine::Engine::dummy(samplerate, max_block_length);
-	Some(Self {
-	    engine,
-	    new_engine: None,
-	    urids: features.map.populate_collection()?,
+        let samplerate = plugin_info.sample_rate();
+        let max_block_length = 8192; /*FIXME*/
+        let engine = engine::Engine::dummy(samplerate, max_block_length);
+        Some(Self {
+            engine,
+            new_engine: None,
+            urids: features.map.populate_collection()?,
 
-	    samplerate,
-	    max_block_length
-	})
+            samplerate,
+            max_block_length
+        })
     }
 
     fn run(&mut self, ports: &mut Ports, features: &mut Self::AudioFeatures) {
         let mut offset: usize = 0;
 
-	for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
-	    *l = 0.0;
-	    *r = 0.0;
-	}
+        for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
+            *l = 0.0;
+            *r = 0.0;
+        }
 
-	let active_engine = if let Some(new_engine) = &mut self.new_engine {
-	    if self.engine.fadeout_finished() {
-		self.engine = self.new_engine.take().unwrap();
-		&mut self.engine
-	    } else {
-		self.engine.process(&mut ports.out_left, &mut ports.out_right);
-		new_engine
-	    }
-	} else {
-	    &mut self.engine
-	};
+        let active_engine = if let Some(new_engine) = &mut self.new_engine {
+            if self.engine.fadeout_finished() {
+                self.engine = self.new_engine.take().unwrap();
+                &mut self.engine
+            } else {
+                self.engine.process(&mut ports.out_left, &mut ports.out_right);
+                new_engine
+            }
+        } else {
+            &mut self.engine
+        };
 
         let control_sequence = ports
             .control
             .read(self.urids.atom.sequence, self.urids.unit.beat)
             .unwrap();
 
-	for (timestamp, message) in control_sequence {
+        for (timestamp, message) in control_sequence {
             match timestamp.as_frames() {
-		Some(ts) if ts > 0  => {
-		    let frame = ts as usize;
-		    active_engine.process(&mut ports.out_left[offset..frame], &mut ports.out_right[offset..frame]);
-		    offset = frame;
-		}
-		_ => {}
+                Some(ts) if ts > 0  => {
+                    let frame = ts as usize;
+                    active_engine.process(&mut ports.out_left[offset..frame], &mut ports.out_right[offset..frame]);
+                    offset = frame;
+                }
+                _ => {}
             };
 
-	    if let Some(msg) = message.read(self.urids.midi.wmidi, ()) {
-		active_engine.midi_event(&msg);
-	    };
+            if let Some(msg) = message.read(self.urids.midi.wmidi, ()) {
+                active_engine.midi_event(&msg);
+            };
 
-	    if let Some((header, mut object_reader)) = message.read(self.urids.atom.object, ()) {
-		if header.otype != self.urids.patch.set {
-		    continue;
-		}
+            if let Some((header, mut object_reader)) = message.read(self.urids.atom.object, ()) {
+                if header.otype != self.urids.patch.set {
+                    continue;
+                }
 
-		if let Some(path) = parse_sfzfile_path(&self.urids, &mut object_reader) {
-		    if let Err(e) = features.schedule.schedule_work(EngineParameters {
-			sfzfile: path.to_string(),
-			host_samplerate: self.samplerate,
-			max_block_length: self.max_block_length
-		    }) {
-			println!("can't schedule work {}", e);
-		    } else {
-			println!("work scheduled");
-		    }
-		}
-	    }
-	}
+                if let Some(path) = parse_sfzfile_path(&self.urids, &mut object_reader) {
+                    if let Err(e) = features.schedule.schedule_work(EngineParameters {
+                        sfzfile: path.to_string(),
+                        host_samplerate: self.samplerate,
+                        max_block_length: self.max_block_length
+                    }) {
+                        println!("can't schedule work {}", e);
+                    } else {
+                        println!("work scheduled");
+                    }
+                }
+            }
+        }
 
-	let nsamples = ports.out_left.len();
-	if offset < nsamples {
-	    active_engine.process(&mut ports.out_left[offset..nsamples], &mut ports.out_right[offset..nsamples]);
-	}
+        let nsamples = ports.out_left.len();
+        if offset < nsamples {
+            active_engine.process(&mut ports.out_left[offset..nsamples], &mut ports.out_right[offset..nsamples]);
+        }
 
-	let gain = match *ports.gain {
-	    g if g < -80.0 => 0.0,
-	    g => soundfonts::utils::dB_to_gain(g)
-	};
+        let gain = match *ports.gain {
+            g if g < -80.0 => 0.0,
+            g => soundfonts::utils::dB_to_gain(g)
+        };
 
-	for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
-	    *l *= gain;
-	    *r *= gain;
-	}
+        for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
+            *l *= gain;
+            *r *= gain;
+        }
     }
 
     fn extension_data(uri: &Uri) -> Option<&'static dyn Any> {
@@ -188,23 +188,23 @@ impl Plugin for SonarigoLV2 {
 
 fn parse_sfzfile_path<'a>(urids: &URIDs, object_reader: &mut atom::object::ObjectReader<'a>) -> Option<&'a str> {
     if let Some((property_header, atom)) = object_reader.next() {
-	if property_header.key != urids.patch.property {
-	    return None;
-	}
-	if atom.read(urids.atom.urid, ()).map_or(true, |urid| urid != urids.sfzfile) {
-	    return None;
-	}
-	if let Some((property_header, atom)) = object_reader.next() {
-	    if property_header.key != urids.patch.value {
-		return None;
-	    }
-	    let path = if let Some(path) = atom.read(urids.atom_path, ()) {
-		path
-	    } else {
-		return None;
-	    };
-	    return Some(path);
-	}
+        if property_header.key != urids.patch.property {
+            return None;
+        }
+        if atom.read(urids.atom.urid, ()).map_or(true, |urid| urid != urids.sfzfile) {
+            return None;
+        }
+        if let Some((property_header, atom)) = object_reader.next() {
+            if property_header.key != urids.patch.value {
+                return None;
+            }
+            let path = if let Some(path) = atom.read(urids.atom_path, ()) {
+                path
+            } else {
+                return None;
+            };
+            return Some(path);
+        }
     }
     None
 }
@@ -221,23 +221,23 @@ impl lv2_worker::Worker for SonarigoLV2 {
     type ResponseData = soundfonts::sfz::engine::Engine;
 
     fn work(response_handler: &lv2_worker::ResponseHandler<Self>, data: Self::WorkData)
-	    -> Result<(), lv2_worker::WorkerError> {
-	println!("work {}", data.sfzfile);
-	let engine = soundfonts::sfz::engine::Engine::new(data.sfzfile,
-							  data.host_samplerate,
-							  data.max_block_length)
-	    .map_err(|_| lv2_worker::WorkerError::Unknown)?;
+            -> Result<(), lv2_worker::WorkerError> {
+        println!("work {}", data.sfzfile);
+        let engine = soundfonts::sfz::engine::Engine::new(data.sfzfile,
+                                                          data.host_samplerate,
+                                                          data.max_block_length)
+            .map_err(|_| lv2_worker::WorkerError::Unknown)?;
 
-	response_handler.respond(engine).map_err(|_| lv2_worker::WorkerError::Unknown)
+        response_handler.respond(engine).map_err(|_| lv2_worker::WorkerError::Unknown)
     }
 
     fn work_response(&mut self, data: Self::ResponseData, _f: &mut Self::AudioFeatures)
-		     -> Result<(), lv2_worker::WorkerError> {
-	println!("work_response");
-	self.engine.fadeout();
-	self.new_engine = Some(data);
+                     -> Result<(), lv2_worker::WorkerError> {
+        println!("work_response");
+        self.engine.fadeout();
+        self.new_engine = Some(data);
 
-	Ok(())
+        Ok(())
     }
 }
 lv2_descriptors!(SonarigoLV2);
