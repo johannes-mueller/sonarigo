@@ -27,6 +27,7 @@ where
     fn read(body: Space<'a>, _: ()) -> Option<&'a str> {
         body.data()
             .and_then(|data| std::str::from_utf8(data).ok())
+            .map(|path| path.trim_matches(char::from(0)))
     }
 
     fn init(frame: FramedMutSpace<'a, 'b>, _: ()) -> Option<AtomPathWriter<'a, 'b>> {
