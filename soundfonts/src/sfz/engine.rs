@@ -187,7 +187,7 @@ impl ControlValRange {
     pub(super) fn covering(&self, vel: wmidi::ControlValue) -> bool {
 	match (self.lo, self.hi) {
 	    (Some(lo), Some(hi)) => vel >= lo && vel <= hi,
-	     _ => false
+     _ => false
 	}
     }
 }
@@ -401,19 +401,6 @@ impl Region {
 	    return;
 	}
 	self.sample.process(out_left, out_right);
-
-	/*
-	for (l, r, (sl, sr)) in izip!(out_left.iter_mut(), out_right.iter_mut(), sample_iterator) {
-	    *l += sl * self.gain * envelope[env_position];
-	    *r += sr * self.gain * envelope[env_position];
-
-	    env_position += 1;
-	}
-
-
-	self.amp_envelope.update(env_position);
-*/
-
     }
 
     fn note_on(&mut self, note: wmidi::Note, velocity: wmidi::Velocity) {
@@ -1400,20 +1387,6 @@ mod tests {
 	    _ => panic!("Expected region, got somthing different.")
 	}
     }
-
-    /*
-    #[test]
-    fn generate_adsr_envelope() {
-	let regions = parse_sfz_text("<region> ampeg_attack=2 ampeg_hold=3 ampeg_decay=4 ampeg_sustain=60 ampeg_release=5".to_string()).unwrap();
-	let region = regions.get(0).unwrap();
-
-	let ads: Vec<f32> = region.ampeg.ads_envelope(1.0, 12)[..12].iter().map(|v| (v*100.0).round()/100.0).collect();
-	assert_eq!(ads.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
-
-	let rel: Vec<f32> = region.ampeg.release_envelope(1.0, 8).iter().map(|v| (v*10000.0).round()/10000.0).collect();
-	assert_eq!(rel.as_slice(), [0.1211, 0.0245, 0.0049, 0.0010, 0.0002, 0.0, 0.0, 0.0]);
-    }
-    */
 
     #[test]
     fn simple_region_process() {

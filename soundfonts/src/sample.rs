@@ -150,30 +150,6 @@ pub(crate) mod tests {
 	}
     }
 
-    /*
-
-    #[test]
-    fn test_iterator() {
-	let v = vec![0.0, 0.0,
-		     1.0, -1.0,
-		     2.0, -2.0,
-		     3.0, -3.0,
-		     4.0, -4.0,
-		     0.0, 0.0];
-	let mut sample = Sample::new(v, 8, 1.0);
-	sample.note_on(1.0, 1.0);
-
-	let mut it = sample.iter(1.0);
-
-	assert_eq!(it.next(), Some((0.0, 0.0)));
-	assert_eq!(it.next(), Some((1.0, -1.0)));
-	assert_eq!(it.next(), Some((2.0, -2.0)));
-	assert_eq!(it.next(), Some((3.0, -3.0)));
-	assert_eq!(it.next(), Some((4.0, -4.0)));
-	assert_eq!(it.next(), Some((0.0, 0.0)));
-    }
-    */
-
     pub fn is_playing_note(sample: &Sample, note: wmidi::Note) -> bool {
 	sample.voices.iter().any(|v| v.note == note && !v.envelope_state.is_releasing())
     }
@@ -182,16 +158,10 @@ pub(crate) mod tests {
 	sample.voices.iter().any(|v| v.note == note && v.envelope_state.is_releasing())
     }
 
-    pub fn is_playing_or_releasing_note(sample: &Sample, note: wmidi::Note) -> bool {
-	sample.voices.iter().any(|v| v.note == note)
-    }
-
-
     pub(crate) fn make_test_sample_data(nsamples: usize, samplerate: f64, freq: f64) -> Vec<f32> {
 	let omega = freq/samplerate * 2.0*PI;
 	(0..nsamples*2).map(|t| ((omega * (t/2) as f64).sin() as f32)).collect()
     }
-
 
     pub(crate) fn make_test_sample(nsamples: usize, samplerate: f64, freq: f64) -> Sample {
 	let sample_data = make_test_sample_data(nsamples, samplerate, freq);
