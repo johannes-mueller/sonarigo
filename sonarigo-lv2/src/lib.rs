@@ -173,6 +173,7 @@ impl Plugin for SonarigoLV2 {
 
         let gain = match *ports.gain {
             g if g < -80.0 => 0.0,
+            g if g >= 20.0 => soundfonts::utils::dB_to_gain(20.0),
             g => soundfonts::utils::dB_to_gain(g)
         };
 
