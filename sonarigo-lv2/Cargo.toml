@@ -9,6 +9,7 @@ crate-type = ["dylib"]
 
 [dependencies]
 lv2 = "0.5"
+lv2-worker = "0.1"
 wmidi = "3.1.0"
 
 soundfonts = { path = "../soundfonts" }

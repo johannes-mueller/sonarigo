@@ -644,6 +644,10 @@ impl Engine {
 		.collect(),
 	}
     }
+
+    pub fn dummy(host_samplerate: f64, max_block_length: usize) -> Engine {
+	Engine::from_region_array(Vec::new(), host_samplerate, max_block_length)
+    }
 }
 
 impl engine::EngineTrait for Engine {
@@ -2848,7 +2852,6 @@ mod tests {
 
 	sampletests::assert_frequency_result_sample(&out_left[4096..60000], engine.regions[0].host_samplerate, 440.0);
 	sampletests::assert_frequency_result_sample(&out_right[4096..60000], engine.regions[0].host_samplerate, 440.0);
-
     }
 
     #[test]

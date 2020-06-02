@@ -1,5 +1,7 @@
+use std::any::Any;
 
 extern crate lv2;
+extern crate lv2_worker;
 
 use lv2::prelude::*;
 use lv2::lv2_atom as atom;
@@ -25,7 +27,6 @@ where
     fn read(body: Space<'a>, _: ()) -> Option<&'a str> {
 	body.data()
             .and_then(|data| std::str::from_utf8(data).ok())
-            .map(|string| &string[..string.len() - 1])
     }
 
     fn init(frame: FramedMutSpace<'a, 'b>, _: ()) -> Option<AtomPathWriter<'a, 'b>> {
@@ -46,7 +47,7 @@ struct SampleFile;
 
 
 #[derive(PortCollection)]
-pub struct Ports {
+struct Ports {
     control: InputPort<AtomPort>,
     out_left: OutputPort<Audio>,
     out_right: OutputPort<Audio>,
@@ -54,12 +55,17 @@ pub struct Ports {
 }
 
 #[derive(FeatureCollection)]
-pub struct Features<'a> {
+struct Features<'a> {
     map: LV2Map<'a>,
 }
 
+#[derive(FeatureCollection)]
+struct AudioFeatures<'a> {
+    schedule: lv2_worker::Schedule<'a, SonarigoLV2>,
+}
+
 #[derive(URIDCollection)]
-pub struct URIDs {
+struct URIDs {
     atom: AtomURIDCollection,
     midi: MidiURIDCollection,
     unit: UnitURIDCollection,
@@ -71,30 +77,35 @@ pub struct URIDs {
 }
 
 
-
 #[uri("http://johannes-mueller.org/oss/lv2/sonarigo#lv2")]
-pub struct SonarigoLV2 {
+struct SonarigoLV2 {
     engine: engine::Engine,
     urids: URIDs,
+
+    samplerate: f64,
+    max_block_length: usize
 }
 
 impl Plugin for SonarigoLV2 {
     type Ports = Ports;
 
     type InitFeatures = Features<'static>;
-    type AudioFeatures = ();
+    type AudioFeatures = AudioFeatures<'static>;
 
     fn new(plugin_info: &PluginInfo, features: &mut Features<'static>) -> Option<Self> {
-	let filename = "/data/Musik/SoundFonts/SalamanderGrandPianoV3_48khz24bit/SalamanderGrandPianoV3.sfz";
 	let samplerate = plugin_info.sample_rate();
-	let engine = engine::Engine::new(filename.to_string(), samplerate, 8192 /*FIXME*/).ok()?;
+	let max_block_length = 8192; /*FIXME*/
+	let engine = engine::Engine::dummy(samplerate, max_block_length);
 	Some(Self {
-	    engine: engine,
-	    urids: features.map.populate_collection()?
+	    engine,
+	    urids: features.map.populate_collection()?,
+
+	    samplerate,
+	    max_block_length
 	})
     }
 
-    fn run(&mut self, ports: &mut Ports, _: &mut ()) {
+    fn run(&mut self, ports: &mut Ports, features: &mut Self::AudioFeatures) {
         let mut offset: usize = 0;
 
         let control_sequence = ports
@@ -122,7 +133,16 @@ impl Plugin for SonarigoLV2 {
 		}
 
 		if let Some(path) = self.parse_sfzfile_path(&mut object_reader) {
-		    println!("received path {}", path);
+		    println!("scheduling work {}", path);
+		    if let Err(e) = features.schedule.schedule_work(EngineParameters {
+			sfzfile: path.to_string(),
+			host_samplerate: self.samplerate,
+			max_block_length: self.max_block_length
+		    }) {
+			println!("can't schedule work {}", e);
+		    } else {
+			println!("work scheduled");
+		    }
 		}
 	    }
 	}
@@ -140,8 +160,11 @@ impl Plugin for SonarigoLV2 {
 	for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
 	    *l *= gain;
 	    *r *= gain;
-
 	}
+    }
+
+    fn extension_data(uri: &Uri) -> Option<&'static dyn Any> {
+        match_extensions![uri, lv2_worker::WorkerDescriptor<Self>]
     }
 }
 
@@ -170,4 +193,34 @@ impl SonarigoLV2 {
     }
 }
 
+struct EngineParameters {
+    sfzfile: std::string::String,
+    host_samplerate: f64,
+    max_block_length: usize
+}
+
+impl lv2_worker::Worker for SonarigoLV2 {
+    type WorkData = EngineParameters;
+
+    type ResponseData = soundfonts::sfz::engine::Engine;
+
+    fn work(response_handler: &lv2_worker::ResponseHandler<Self>, data: Self::WorkData)
+	    -> Result<(), lv2_worker::WorkerError> {
+	println!("work {}", data.sfzfile);
+	let engine = soundfonts::sfz::engine::Engine::new(data.sfzfile,
+							  data.host_samplerate,
+							  data.max_block_length)
+	    .map_err(|_| lv2_worker::WorkerError::Unknown)?;
+
+	response_handler.respond(engine).map_err(|_| lv2_worker::WorkerError::Unknown)
+    }
+
+    fn work_response(&mut self, data: Self::ResponseData, _f: &mut Self::AudioFeatures)
+		     -> Result<(), lv2_worker::WorkerError> {
+	println!("work_response");
+	self.engine = data;
+
+	Ok(())
+    }
+}
 lv2_descriptors!(SonarigoLV2);
