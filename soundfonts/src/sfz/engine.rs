@@ -573,6 +573,10 @@ impl Region {
 	    self.sample.all_notes_off();
 	}
     }
+
+    fn all_notes_off(&mut self) {
+	self.sample.all_notes_off();
+    }
 }
 
 #[derive(Debug)]
@@ -643,6 +647,16 @@ impl Engine {
 						Region::new(rd.clone(), sample.to_vec(), host_samplerate, *s_samplerate, max_block_length))
 		.collect(),
 	}
+    }
+
+    pub fn fadeout(&mut self) {
+	for r in &mut self.regions {
+	    r.all_notes_off();
+	}
+    }
+
+    pub fn fadeout_finished(&self) -> bool {
+	!self.regions.iter().any(|r| r.sample.is_playing())
     }
 
     pub fn dummy(host_samplerate: f64, max_block_length: usize) -> Engine {
@@ -2866,4 +2880,42 @@ mod tests {
 
 	engine.process(&mut out_left, &mut out_right);
     }
+
+        #[test]
+    fn engine_fade_out() {
+	let mut sample = Vec::new();
+	sample.resize(1024, 1.0);
+
+	let mut rd = RegionData::default();
+	rd.ampeg.set_release(0.2).unwrap();
+
+	let mut engine = Engine::from_region_array(vec![(rd, sample, 100.0)], 100.0, 24);
+
+	engine.midi_event(&wmidi::MidiMessage::NoteOn(wmidi::Channel::Ch1, wmidi::Note::C3, wmidi::Velocity::MAX));
+
+	pull_samples_engine(&mut engine, 16);
+
+	assert!(!engine.fadeout_finished());
+
+	assert!(sampletests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(!sampletests::is_releasing_note(&engine.regions[0].sample, wmidi::Note::C3));
+
+	engine.fadeout();
+
+	assert!(!sampletests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(sampletests::is_releasing_note(&engine.regions[0].sample, wmidi::Note::C3));
+
+	pull_samples_engine(&mut engine, 24);
+
+	assert!(!sampletests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(sampletests::is_releasing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(!engine.fadeout_finished());
+
+	pull_samples_engine(&mut engine, 24);
+
+	assert!(!sampletests::is_playing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(!sampletests::is_releasing_note(&engine.regions[0].sample, wmidi::Note::C3));
+	assert!(engine.fadeout_finished());
+    }
+
 }
