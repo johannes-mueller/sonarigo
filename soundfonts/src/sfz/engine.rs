@@ -498,6 +498,7 @@ impl Region {
             _ => {}
         }
         self.note_on(note, velocity);
+        self.notes_for_release_trigger.remove(&note);
         true
     }
 
@@ -2225,10 +2226,7 @@ mod tests {
         assert!(sample::tests::is_playing_note(&region.sample, Note::C3));
         assert!(!sample::tests::is_releasing_note(&region.sample, Note::C3));
 
-        region.pass_midi_msg(
-            &MidiMessage::NoteOn(Channel::Ch1, Note::C3, Velocity::MAX),
-            0.0,
-        );
+        region.pass_midi_msg(&MidiMessage::NoteOn(Channel::Ch1, Note::C3, Velocity::MAX), 0.0);
         assert!(sample::tests::is_playing_note(&region.sample, Note::C3));
         assert!(sample::tests::is_releasing_note(&region.sample, Note::C3));
 
@@ -2243,10 +2241,9 @@ mod tests {
         );
 
         pull_samples(&mut region, 2);
-        assert!(!sample::tests::is_playing_note(&region.sample, Note::C3));
-        assert!(!sample::tests::is_playing_note(&region.sample, Note::D3));
+        assert!(sample::tests::is_playing_note(&region.sample, Note::C3));
 
-        region.pass_midi_msg(&MidiMessage::NoteOff(Channel::Ch1, Note::D3,  Velocity::MAX), 0.0);
+        region.pass_midi_msg(&MidiMessage::NoteOff(Channel::Ch1, Note::C3,  Velocity::MAX), 0.0);
         pull_samples(&mut region, 2);
         assert!(!region.sample.is_playing());
     }
