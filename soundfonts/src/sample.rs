@@ -10,7 +10,7 @@ struct Voice {
 
     envelope_state: envelopes::State,
     last_envelope_gain: f32,
-    release_start_gain: f32
+    release_start_gain: f32,
 }
 
 impl Voice {
@@ -23,7 +23,7 @@ impl Voice {
 
             envelope_state: envelopes::State::AttackDecay(0),
             last_envelope_gain: 1.0,
-            release_start_gain: 1.0
+            release_start_gain: 1.0,
         }
     }
 }
@@ -42,7 +42,12 @@ pub struct Sample {
 }
 
 impl Sample {
-    pub fn new(mut sample_data: Vec<f32>, max_block_length: usize, native_frequency: f64, envelope: envelopes::ADSREnvelope) -> Self {
+    pub fn new(
+        mut sample_data: Vec<f32>,
+        max_block_length: usize,
+        native_frequency: f64,
+        envelope: envelopes::ADSREnvelope,
+    ) -> Self {
         let real_sample_length = sample_data.len();
         let frames = real_sample_length / 2;
 
@@ -58,7 +63,7 @@ impl Sample {
 
             native_frequency: native_frequency,
 
-            envelope: envelope
+            envelope: envelope,
         }
     }
 
@@ -90,28 +95,34 @@ impl Sample {
     pub fn process(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
         for voice in &mut self.voices {
             let ratio = voice.frequency / self.native_frequency;
-            let needed_sample_length = (voice.position + self.max_block_length as f64 * ratio).ceil() as usize + 5;
-            if  needed_sample_length * 2 >= self.sample_data.len() {
+            let needed_sample_length =
+                (voice.position + self.max_block_length as f64 * ratio).ceil() as usize + 5;
+            if needed_sample_length * 2 >= self.sample_data.len() {
                 self.sample_data.resize(needed_sample_length * 2, 0.0)
             }
 
             let (envelope, mut env_position) = self.envelope.active_envelope(voice.envelope_state);
-            for (l,r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
+            for (l, r) in Iterator::zip(out_left.iter_mut(), out_right.iter_mut()) {
                 let (remainder, sample_pos) = {
                     let sample_pos = voice.position.floor();
                     ((voice.position - sample_pos), sample_pos as usize)
                 };
                 let gain = voice.gain * envelope[env_position] * voice.release_start_gain;
-                *l += gain * cubic(&self.sample_data, 2*sample_pos, remainder);
-                *r += gain * cubic(&self.sample_data, 2*sample_pos+1, remainder);
+                *l += gain * cubic(&self.sample_data, 2 * sample_pos, remainder);
+                *r += gain * cubic(&self.sample_data, 2 * sample_pos + 1, remainder);
                 voice.position += ratio;
                 env_position += 1;
-            };
-            voice.last_envelope_gain = *envelope.get(env_position).unwrap_or(&envelope[env_position-1]);
-            self.envelope.update_state(&mut voice.envelope_state, env_position);
-        };
+            }
+            voice.last_envelope_gain = *envelope
+                .get(env_position)
+                .unwrap_or(&envelope[env_position - 1]);
+            self.envelope
+                .update_state(&mut voice.envelope_state, env_position);
+        }
         let real_sample_length = self.real_sample_length;
-        self.voices.retain(|voice| voice.position < real_sample_length && voice.envelope_state.is_active());
+        self.voices.retain(|voice| {
+            voice.position < real_sample_length && voice.envelope_state.is_active()
+        });
     }
 }
 
@@ -120,25 +131,24 @@ fn cubic(sample_data: &[f32], pos: usize, remainder: f64) -> f32 {
 
     let p0 = sample_data[((pos + len) - 2) % len] as f64;
     let p1 = sample_data[pos] as f64;
-    let p2 = sample_data[pos+2] as f64;
-    let p3 = sample_data[pos+4] as f64;
+    let p2 = sample_data[pos + 2] as f64;
+    let p3 = sample_data[pos + 4] as f64;
 
     let a = remainder;
     let b = 1.0 - a;
     let c = a * b;
 
-    ((1.0  + 1.5 * c) * (p1 * b + p2 * a) - 0.5 * c * (p0 * b + p1 + p2 + p3 * a)) as f32
+    ((1.0 + 1.5 * c) * (p1 * b + p2 * a) - 0.5 * c * (p0 * b + p1 + p2 + p3 * a)) as f32
 }
-
 
 #[cfg(test)]
 pub(crate) mod tests {
 
     use super::*;
 
-    use std::f64::consts::PI;
-    use std::f32::consts::SQRT_2;
     use std::convert::TryFrom;
+    use std::f32::consts::SQRT_2;
+    use std::f64::consts::PI;
     use wmidi;
 
     pub(crate) fn f32_eq(a: f32, b: f32) -> bool {
@@ -159,15 +169,21 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn make_test_sample_data(nsamples: usize, samplerate: f64, freq: f64) -> Vec<f32> {
-        let omega = freq/samplerate * 2.0*PI;
-        (0..nsamples*2).map(|t| ((omega * (t/2) as f64).sin() as f32)).collect()
+        let omega = freq / samplerate * 2.0 * PI;
+        (0..nsamples * 2)
+            .map(|t| ((omega * (t / 2) as f64).sin() as f32))
+            .collect()
     }
 
     pub(crate) fn make_test_sample(nsamples: usize, samplerate: f64, freq: f64) -> Sample {
         let sample_data = make_test_sample_data(nsamples, samplerate, freq);
-        Sample::new(sample_data, nsamples, freq, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, nsamples))
+        Sample::new(
+            sample_data,
+            nsamples,
+            freq,
+            envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, nsamples),
+        )
     }
-
 
     pub(crate) fn assert_frequency(mut sample: Sample, samplerate: f64, test_freq: f64) {
         let mut halfw_l = 0.0;
@@ -175,7 +191,7 @@ pub(crate) mod tests {
         let mut last_l = 0.0;
         let mut last_r = 0.0;
 
-        let length = (sample.real_sample_length/2.0).ceil() as usize;
+        let length = (sample.real_sample_length / 2.0).ceil() as usize;
 
         let mut out_left = Vec::new();
         out_left.resize(length, 0.0);
@@ -196,13 +212,23 @@ pub(crate) mod tests {
             last_r = *sl;
         }
 
-        let to_freq = samplerate/((sample.real_sample_length/2.0) as f64);
+        let to_freq = samplerate / ((sample.real_sample_length / 2.0) as f64);
 
-        if  halfw_l * to_freq > test_freq || (halfw_l + 1.0) * to_freq < test_freq {
-            panic!("left frequency does not match {} {} {}", halfw_l * to_freq, (halfw_l + 1.0) * to_freq, test_freq)
+        if halfw_l * to_freq > test_freq || (halfw_l + 1.0) * to_freq < test_freq {
+            panic!(
+                "left frequency does not match {} {} {}",
+                halfw_l * to_freq,
+                (halfw_l + 1.0) * to_freq,
+                test_freq
+            )
         }
-        if  halfw_r * to_freq > test_freq || (halfw_r + 1.0) * to_freq < test_freq {
-            panic!("right frequency does not match {} {} {}", halfw_r * to_freq, (halfw_r + 1.0) * to_freq, test_freq)
+        if halfw_r * to_freq > test_freq || (halfw_r + 1.0) * to_freq < test_freq {
+            panic!(
+                "right frequency does not match {} {} {}",
+                halfw_r * to_freq,
+                (halfw_r + 1.0) * to_freq,
+                test_freq
+            )
         }
     }
 
@@ -217,10 +243,18 @@ pub(crate) mod tests {
             last = *s
         }
 
-        let to_freq = samplerate/sample.len() as f64;
+        let to_freq = samplerate / sample.len() as f64;
 
         if (halfw - 1.0) * to_freq > test_freq || (halfw + 1.0) * to_freq < test_freq {
-            panic!("sample frequency does not match {} {} {} / {} samples, {} {}", halfw * to_freq, (halfw + 1.0) * to_freq, test_freq, sample.len(), halfw, test_freq/to_freq)
+            panic!(
+                "sample frequency does not match {} {} {} / {} samples, {} {}",
+                halfw * to_freq,
+                (halfw + 1.0) * to_freq,
+                test_freq,
+                sample.len(),
+                halfw,
+                test_freq / to_freq
+            )
         }
     }
 
@@ -229,8 +263,10 @@ pub(crate) mod tests {
         let freq = 440.0;
         let samplerate = 48000.0;
 
-        let omega = freq/samplerate * 2.0*PI;
-        let test_sample: Vec<f32> = (0..96000).map(|t| ((omega * t as f64).sin() as f32)).collect();
+        let omega = freq / samplerate * 2.0 * PI;
+        let test_sample: Vec<f32> = (0..96000)
+            .map(|t| ((omega * t as f64).sin() as f32))
+            .collect();
         assert_frequency_result_sample(&test_sample, samplerate, freq);
     }
 
@@ -240,7 +276,12 @@ pub(crate) mod tests {
                           0.5, 1.0,
                           1.0, 0.5];
 
-        let sample = Sample::new(sample, 16, 440.0, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, 16));
+        let sample = Sample::new(
+            sample,
+            16,
+            440.0,
+            envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, 16),
+        );
         assert_eq!(sample.sample_data.len(), 64);
     }
 
@@ -309,7 +350,12 @@ pub(crate) mod tests {
         let note = wmidi::Note::C3;
         let frequency = note.to_freq_f64();
 
-        let mut sample = Sample::new(sample, max_block_length, frequency, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length));
+        let mut sample = Sample::new(
+            sample,
+            max_block_length,
+            frequency,
+            envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length),
+        );
 
         sample.note_on(note, frequency, 1.0);
 
@@ -355,7 +401,12 @@ pub(crate) mod tests {
         let note = wmidi::Note::C3;
         let frequency = note.to_freq_f64();
 
-        let mut sample = Sample::new(sample_data, max_block_length, frequency, envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length));
+        let mut sample = Sample::new(
+            sample_data,
+            max_block_length,
+            frequency,
+            envelopes::ADSREnvelope::new(&envelopes::Generator::default(), 1.0, max_block_length),
+        );
 
         sample.note_on(note, frequency, 1.0);
 
@@ -405,7 +456,12 @@ pub(crate) mod tests {
         eg.set_sustain(60.0).unwrap();
         eg.set_release(5.0).unwrap();
 
-        Sample::new(sample, max_block_length, frequency, envelopes::ADSREnvelope::new(&eg, 1.0, max_block_length))
+        Sample::new(
+            sample,
+            max_block_length,
+            frequency,
+            envelopes::ADSREnvelope::new(&eg, 1.0, max_block_length),
+        )
     }
 
     #[test]
@@ -421,8 +477,14 @@ pub(crate) mod tests {
 
         sample.process(&mut out_left, &mut out_right);
 
-        let out: Vec<f32> = out_left.iter().map(|v| (v*100.0).round()/100.0).collect();
-        assert_eq!(out.as_slice(), [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]);
+        let out: Vec<f32> = out_left
+            .iter()
+            .map(|v| (v * 100.0).round() / 100.0)
+            .collect();
+        assert_eq!(
+            out.as_slice(),
+            [0.0, 0.5, 1.0, 1.0, 1.0, 0.65, 0.61, 0.6, 0.6, 0.6, 0.6, 0.6]
+        );
     }
 
     #[test]
@@ -557,7 +619,7 @@ pub(crate) mod tests {
         let frequency = note.to_freq_f64();
         let mut sample = make_envelope_test_sample(frequency);
 
-        sample.note_on(note, frequency, 1.0/0.65413);
+        sample.note_on(note, frequency, 1.0 / 0.65413);
 
         let mut out_left = [0.0; 5];
         let mut out_right = [0.0; 5];
@@ -589,7 +651,7 @@ pub(crate) mod tests {
         let frequency = note.to_freq_f64();
         let mut sample = make_envelope_test_sample(frequency);
 
-        sample.note_on(note, frequency, 1.0/0.6);
+        sample.note_on(note, frequency, 1.0 / 0.6);
 
         let mut out_left = [0.0; 16];
         let mut out_right = [0.0; 16];
@@ -655,14 +717,20 @@ pub(crate) mod tests {
         let mut out_right = [0.0; 2];
         sample.process(&mut out_left, &mut out_right);
 
-        assert!(sample.voices[0].envelope_state.is_active() && !sample.voices[0].envelope_state.is_releasing());
+        assert!(
+            sample.voices[0].envelope_state.is_active()
+                && !sample.voices[0].envelope_state.is_releasing()
+        );
         assert_eq!(sample.voices[0].position, 2.0);
         assert!(is_playing_note(&sample, note));
         assert!(!is_releasing_note(&sample, note));
 
         sample.note_on(note, frequency, 1.0);
         assert!(sample.voices[0].envelope_state.is_releasing());
-        assert!(sample.voices[1].envelope_state.is_active()&& !sample.voices[1].envelope_state.is_releasing());
+        assert!(
+            sample.voices[1].envelope_state.is_active()
+                && !sample.voices[1].envelope_state.is_releasing()
+        );
 
         assert!(is_playing_note(&sample, note));
         assert!(is_releasing_note(&sample, note));
@@ -680,7 +748,12 @@ pub(crate) mod tests {
     fn note_on_off_frequencies() {
         let sample_dat = vec![1.0; 1 << 24];
         let eg = envelopes::Generator::default();
-        let mut sample = Sample::new(sample_dat, 4, 1.0, envelopes::ADSREnvelope::new(&eg, 1.0, 4));
+        let mut sample = Sample::new(
+            sample_dat,
+            4,
+            1.0,
+            envelopes::ADSREnvelope::new(&eg, 1.0, 4),
+        );
 
         for n in 0u8..127u8 {
             let note = wmidi::Note::try_from(n).unwrap();

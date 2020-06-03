@@ -10,17 +10,17 @@ pub(crate) struct Generator {
     hold: f32,
     decay: f32,
     sustain: f32,
-    release: f32
+    release: f32,
 }
 
 impl Default for Generator {
     fn default() -> Self {
         Generator {
-            attack: 0.0 ,
-            hold: 0.0 ,
-            decay: 0.0 ,
-            sustain: 1.0 ,
-            release: 0.0
+            attack: 0.0,
+            hold: 0.0,
+            decay: 0.0,
+            sustain: 1.0,
+            release: 0.0,
         }
     }
 }
@@ -53,26 +53,28 @@ impl Generator {
     }
 
     fn ads_envelope(&self, samplerate: f32, max_block_length: usize) -> Vec<f32> {
-        let length = calc_needed_samples(self.attack + self.hold + 2.0*self.decay, samplerate, max_block_length);
+        let length = calc_needed_samples(
+            self.attack + self.hold + 2.0 * self.decay,
+            samplerate,
+            max_block_length,
+        );
 
         let mut env = Vec::with_capacity(length);
         env.resize(length, 0.0);
 
-        let decay_step = (-8.0/(samplerate*self.decay)).exp();
+        let decay_step = (-8.0 / (samplerate * self.decay)).exp();
         let mut time = 0;
         let mut last = 1.0 - self.sustain;
 
         for e in env.iter_mut() {
             *e = match time as f32 / samplerate {
-                t if t < self.attack
-                    => t/self.attack,
-                t if t < self.attack + self.hold
-                    => 1.0,
-                t if t < self.attack + self.hold + 2.0*self.decay => {
+                t if t < self.attack => t / self.attack,
+                t if t < self.attack + self.hold => 1.0,
+                t if t < self.attack + self.hold + 2.0 * self.decay => {
                     last *= decay_step;
                     self.sustain + last
                 }
-                _ => self.sustain
+                _ => self.sustain,
             };
             time += 1;
         }
@@ -86,11 +88,11 @@ impl Generator {
     }
 
     fn release_envelope(&self, samplerate: f32, max_block_length: usize) -> Vec<f32> {
-        let length = calc_needed_samples(2.0*self.release, samplerate, max_block_length);
+        let length = calc_needed_samples(2.0 * self.release, samplerate, max_block_length);
         let mut env = Vec::new();
         env.resize(length, 0.0);
 
-        let release_step = (-8.0/(samplerate*self.release)).exp();
+        let release_step = (-8.0 / (samplerate * self.release)).exp();
         let mut last = self.sustain;
 
         for e in env.iter_mut() {
@@ -107,22 +109,21 @@ pub enum State {
     AttackDecay(usize),
     Sustain,
     Release(usize),
-    Inactive
+    Inactive,
 }
 
 impl State {
     pub fn is_active(&self) -> bool {
         match *self {
             State::Inactive => false,
-            _ => true
+            _ => true,
         }
     }
 
     pub fn is_releasing(&self) -> bool {
         match *self {
-            State::Inactive |
-            State::Release(_) => true,
-            _ => false
+            State::Inactive | State::Release(_) => true,
+            _ => false,
         }
     }
 }
@@ -167,14 +168,16 @@ impl ADSREnvelope {
                     State::Sustain
                 }
             }
-            State::Release(_) =>  {
-                if new_pos < self.release_envelope.len() - self.max_block_length && self.release_envelope[new_pos] > utils::dB_to_gain(-160.0) {
+            State::Release(_) => {
+                if new_pos < self.release_envelope.len() - self.max_block_length
+                    && self.release_envelope[new_pos] > utils::dB_to_gain(-160.0)
+                {
                     State::Release(new_pos)
                 } else {
                     State::Inactive
                 }
             }
-            s => **s
+            s => **s,
         }
     }
 }

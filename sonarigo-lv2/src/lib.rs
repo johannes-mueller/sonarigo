@@ -158,7 +158,8 @@ impl Plugin for SonarigoLV2 {
             match timestamp.as_frames() {
                 Some(ts) if ts > 0  => {
                     let frame = ts as usize;
-                    active_engine.process(&mut ports.out_left[offset..frame], &mut ports.out_right[offset..frame]);
+                    active_engine.process(&mut ports.out_left[offset..frame],
+                                          &mut ports.out_right[offset..frame]);
                     offset = frame;
                 }
                 _ => {}
@@ -192,7 +193,8 @@ impl Plugin for SonarigoLV2 {
 
         let nsamples = ports.out_left.len();
         if offset < nsamples {
-            active_engine.process(&mut ports.out_left[offset..nsamples], &mut ports.out_right[offset..nsamples]);
+            active_engine.process(&mut ports.out_left[offset..nsamples],
+                                  &mut ports.out_right[offset..nsamples]);
         }
 
         let gain_target = match *ports.gain {
@@ -246,7 +248,8 @@ impl Plugin for SonarigoLV2 {
     }
 }
 
-fn parse_sfzfile_path<'a>(urids: &URIDs, object_reader: &mut atom::object::ObjectReader<'a>) -> Option<&'a str> {
+fn parse_sfzfile_path<'a>(urids: &URIDs, object_reader:
+                          &mut atom::object::ObjectReader<'a>) -> Option<&'a str> {
     if let Some((property_header, atom)) = object_reader.next() {
         if property_header.key != urids.patch.property {
             return None;
