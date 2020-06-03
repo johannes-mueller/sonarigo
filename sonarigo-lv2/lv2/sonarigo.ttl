@@ -51,18 +51,26 @@ sonarigo:lv2
         lv2:symbol "control" ;
         lv2:name "Midi In" ;
         ] , [
-        a lv2:OutputPort, lv2:AudioPort ;
+        a lv2:OutputPort, atom:AtomPort ;
+        atom:bufferType atom:Sequence ;
+        atom:supports patch:Message;
+        lv2:designation lv2:control ;
         lv2:index 1 ;
+        lv2:symbol "notify" ;
+        lv2:name "UI Notifications" ;
+        ] , [
+        a lv2:OutputPort, lv2:AudioPort ;
+        lv2:index 2 ;
         lv2:symbol "outL" ;
         lv2:name "Out Left" ;
         ] , [
         a lv2:OutputPort, lv2:AudioPort ;
-        lv2:index 2 ;
+        lv2:index 3 ;
         lv2:symbol "outR" ;
         lv2:name "Output Right" ;
         ] , [
         a lv2:InputPort, lv2:ControlPort ;
-        lv2:index 3 ;
+        lv2:index 4 ;
         lv2:symbol "level" ;
         lv2:name "Output Level" ;
         lv2:default -6.0 ;

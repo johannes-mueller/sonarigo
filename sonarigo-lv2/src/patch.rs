@@ -22,7 +22,6 @@ pub struct PatchValue;
 
 #[derive(URIDCollection)]
 pub struct PatchURIDCollection {
-    atom: AtomURIDCollection,
     pub set: URID<PatchSet>,
     pub get: URID<PatchGet>,
     pub put: URID<PatchPut>,

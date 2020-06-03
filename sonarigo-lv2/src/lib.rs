@@ -1,5 +1,7 @@
 use std::any::Any;
 
+use std::f32::consts::PI;
+
 extern crate lv2;
 extern crate lv2_worker;
 
@@ -15,8 +17,7 @@ mod patch;
 struct AtomPath;
 
 impl<'a, 'b> Atom<'a, 'b> for AtomPath
-where
-    'a: 'b,
+where 'a: 'b,
 {
     type ReadParameter = ();
     type ReadHandle = &'a str;
@@ -39,6 +40,13 @@ struct AtomPathWriter<'a, 'b> {
     frame: FramedMutSpace<'a, 'b>
 }
 
+impl<'a, 'b> AtomPathWriter<'a, 'b> {
+    pub fn append(&mut self, string: &str) -> Option<&mut str> {
+        let data = string.as_bytes();
+        let space = self.frame.write_raw(data, false)?;
+        unsafe { Some(std::str::from_utf8_unchecked_mut(space)) }
+    }
+}
 
 #[uri("http://lv2plug.in/ns/ext/state#StateChanged")]
 struct StateChanged;
@@ -50,6 +58,7 @@ struct SampleFile;
 #[derive(PortCollection)]
 struct Ports {
     control: InputPort<AtomPort>,
+    notify: OutputPort<AtomPort>,
     out_left: OutputPort<Audio>,
     out_right: OutputPort<Audio>,
     gain: InputPort<Control>,
@@ -84,8 +93,14 @@ struct SonarigoLV2 {
     new_engine: Option<engine::Engine>,
     urids: URIDs,
 
+    sfzfile_path: Option<std::string::String>,
+
     samplerate: f64,
-    max_block_length: usize
+    max_block_length: usize,
+
+    state_notification_needed: bool,
+
+    current_gain: f32
 }
 
 impl Plugin for SonarigoLV2 {
@@ -103,8 +118,14 @@ impl Plugin for SonarigoLV2 {
             new_engine: None,
             urids: features.map.populate_collection()?,
 
+            sfzfile_path: None,
+
             samplerate,
-            max_block_length
+            max_block_length,
+
+            state_notification_needed: false,
+
+            current_gain: soundfonts::utils::dB_to_gain(-6.0)
         })
     }
 
@@ -148,20 +169,23 @@ impl Plugin for SonarigoLV2 {
             };
 
             if let Some((header, mut object_reader)) = message.read(self.urids.atom.object, ()) {
-                if header.otype != self.urids.patch.set {
-                    continue;
-                }
-
-                if let Some(path) = parse_sfzfile_path(&self.urids, &mut object_reader) {
-                    if let Err(e) = features.schedule.schedule_work(EngineParameters {
-                        sfzfile: path.to_string(),
-                        host_samplerate: self.samplerate,
-                        max_block_length: self.max_block_length
-                    }) {
-                        println!("can't schedule work {}", e);
-                    } else {
-                        println!("work scheduled");
+                println!("received message");
+                if header.otype == self.urids.patch.set {
+                    if let Some(path) = parse_sfzfile_path(&self.urids, &mut object_reader) {
+                        if let Err(e) = features.schedule.schedule_work(EngineParameters {
+                            sfzfile: path.to_string(),
+                            host_samplerate: self.samplerate,
+                            max_block_length: self.max_block_length
+                        }) {
+                            println!("can't schedule work {}", e);
+                        } else {
+                            println!("work scheduled");
+                        }
+                        self.sfzfile_path = Some(path.to_string());
                     }
+                } else if header.otype == self.urids.patch.get {
+                    println!("recieved get request");
+                    self.state_notification_needed = true;
                 }
             }
         }
@@ -171,16 +195,50 @@ impl Plugin for SonarigoLV2 {
             active_engine.process(&mut ports.out_left[offset..nsamples], &mut ports.out_right[offset..nsamples]);
         }
 
-        let gain = match *ports.gain {
+        let gain_target = match *ports.gain {
             g if g < -80.0 => 0.0,
             g if g >= 20.0 => soundfonts::utils::dB_to_gain(20.0),
             g => soundfonts::utils::dB_to_gain(g)
         };
 
+        let tau = 1.0 - (-2.0 * PI * 25.0 / self.samplerate as f32).exp();
+        let mut current_gain = self.current_gain;
+
         for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
-            *l *= gain;
-            *r *= gain;
+            current_gain += tau * (gain_target - current_gain);
+            *l *= current_gain;
+            *r *= current_gain;
         }
+
+	if (tau * (current_gain - gain_target)).abs() < std::f32::EPSILON * current_gain {
+		current_gain = gain_target;
+	}
+        self.current_gain = current_gain;
+
+        if self.state_notification_needed {//&& self.sfzfile_path.is_some() {
+            println!("trying to notify");
+
+            let mut object_writer = ports.notify.init(
+                self.urids.atom.object,
+                ObjectHeader {
+                    id: None,
+                    otype: self.urids.patch.set.into_general(),
+                }
+            ).unwrap();
+
+            object_writer.init(self.urids.patch.property, None,
+                               self.urids.atom.urid,
+                               self.urids.sfzfile.into_general());
+
+            let mut prop_writer = object_writer.init(self.urids.patch.value, None,
+                                                 self.urids.atom_path, ()).unwrap();
+            let test_string = prop_writer.append(self.sfzfile_path.as_ref().unwrap());
+
+            println!("wrote {:?}", test_string);
+
+            self.state_notification_needed = false;
+        }
+
     }
 
     fn extension_data(uri: &Uri) -> Option<&'static dyn Any> {
@@ -228,7 +286,10 @@ impl lv2_worker::Worker for SonarigoLV2 {
         let engine = soundfonts::sfz::engine::Engine::new(data.sfzfile,
                                                           data.host_samplerate,
                                                           data.max_block_length)
-            .map_err(|_| lv2_worker::WorkerError::Unknown)?;
+            .map_err(|e| {
+                println!("failed {:?}", e);
+                lv2_worker::WorkerError::Unknown
+            })?;
 
         response_handler.respond(engine).map_err(|_| lv2_worker::WorkerError::Unknown)
     }
@@ -238,6 +299,7 @@ impl lv2_worker::Worker for SonarigoLV2 {
         println!("work_response");
         self.engine.fadeout();
         self.new_engine = Some(data);
+        self.state_notification_needed = true;
 
         Ok(())
     }
