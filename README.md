@@ -13,7 +13,8 @@ complicates things.
 ## Status
 
 The development is in an early stage. Only the features needed for the
-[Salamander Grand Piano](https://sfzinstruments.github.io/pianos/salamander).
+[Salamander Grand Piano](https://sfzinstruments.github.io/pianos/salamander)
+are implemented as of now.
 
 There is a rudimentary jack application and a rudimentary LV2 plugin.
 
@@ -49,7 +50,13 @@ gain. That's it.
 
 ### Things I will definitely do
 
+* Do all kinds of tiny improvements and bugfixes
+
+* Implement proper Atom communication between LV2 plugin and the host
+
 * Implement the important `loop_*` opcodes.
+
+* Implement some other important sfz tags
 
 
 ### Things I will probably do
