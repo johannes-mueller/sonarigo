@@ -11,42 +11,7 @@ use lv2::lv2_atom as atom;
 use soundfonts::engine::EngineTrait;
 use soundfonts::sfz::engine;
 
-mod patch;
-
-#[uri("http://lv2plug.in/ns/ext/atom#Path")]
-struct AtomPath;
-
-impl<'a, 'b> Atom<'a, 'b> for AtomPath
-where 'a: 'b,
-{
-    type ReadParameter = ();
-    type ReadHandle = &'a str;
-
-    type WriteParameter = ();
-    type WriteHandle = AtomPathWriter<'a, 'b>;
-
-    fn read(body: Space<'a>, _: ()) -> Option<&'a str> {
-        body.data()
-            .and_then(|data| std::str::from_utf8(data).ok())
-            .map(|path| path.trim_matches(char::from(0)))
-    }
-
-    fn init(frame: FramedMutSpace<'a, 'b>, _: ()) -> Option<AtomPathWriter<'a, 'b>> {
-        Some(AtomPathWriter { frame })
-    }
-}
-
-struct AtomPathWriter<'a, 'b> {
-    frame: FramedMutSpace<'a, 'b>
-}
-
-impl<'a, 'b> AtomPathWriter<'a, 'b> {
-    pub fn append(&mut self, string: &str) -> Option<&mut str> {
-        let data = string.as_bytes();
-        let space = self.frame.write_raw(data, false)?;
-        unsafe { Some(std::str::from_utf8_unchecked_mut(space)) }
-    }
-}
+mod lv2_stuff;
 
 #[uri("http://lv2plug.in/ns/ext/state#StateChanged")]
 struct StateChanged;
@@ -79,9 +44,9 @@ struct URIDs {
     atom: AtomURIDCollection,
     midi: MidiURIDCollection,
     unit: UnitURIDCollection,
-    patch: patch::PatchURIDCollection,
+    patch: lv2_stuff::PatchURIDCollection,
     state_changed: URID<StateChanged>,
-    atom_path: URID<AtomPath>,
+    atom_path: URID<lv2_stuff::AtomPath>,
 
     sfzfile: URID<SampleFile>,
 }
