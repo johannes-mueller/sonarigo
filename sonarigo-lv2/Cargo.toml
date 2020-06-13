@@ -5,7 +5,7 @@ authors = ["Johannes Mueller <github@johannes-mueller.org>"]
 edition = "2018"
 
 [lib]
-crate-type = ["dylib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 lv2 = "0.5"
