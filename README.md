@@ -23,8 +23,9 @@ There is a rudimentary jack application and a rudimentary LV2 plugin.
 
 Tricky. The thing is written in Rust, so you at first need to have a running
 rust compiler compile it and Cargo, Rust's package manager to fetch the
-dependencies. On Ubuntu you can install the packages `rustc` and `cargo`. On
-other distros there are probably similar packages. Also take a look at the
+dependencies. On Ubuntu you can install the packages `rustc` and `cargo`.
+If you want to use `sonarigo` as an LV2 plugin, you additionally need to install `clang`.
+On other distros there are probably similar packages. Also take a look at the
 recommendations on the [Rust page](https://www.rust-lang.org/tools/install) and
 in the [Cargo Book](https://doc.rust-lang.org/cargo/getting-started/installation.html).
 
