@@ -94,7 +94,7 @@ impl Plugin for SonarigoLV2 {
         })
     }
 
-    fn run(&mut self, ports: &mut Ports, features: &mut Self::AudioFeatures) {
+    fn run(&mut self, ports: &mut Ports, features: &mut Self::AudioFeatures, _: u32) {
         let mut offset: usize = 0;
 
         for (l, r) in Iterator::zip(ports.out_left.iter_mut(), ports.out_right.iter_mut()) {
@@ -193,11 +193,11 @@ impl Plugin for SonarigoLV2 {
                 }
             ).unwrap();
 
-            object_writer.init(self.urids.patch.property, None,
+            object_writer.init(self.urids.patch.property,
                                self.urids.atom.urid,
                                self.urids.sfzfile.into_general());
 
-            let mut prop_writer = object_writer.init(self.urids.patch.value, None,
+            let mut prop_writer = object_writer.init(self.urids.patch.value,
                                                  self.urids.atom_path, ()).unwrap();
             let test_string = prop_writer.append(self.sfzfile_path.as_ref().unwrap());
 
